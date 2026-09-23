@@ -1,0 +1,6 @@
+github.com/tetratelabs/wazero v1.12.0 h1:DuWcpNu/FzgEXgGBDp8J1Spc+CWOvvtvVyjKlaZopYU=
+github.com/tetratelabs/wazero v1.12.0/go.mod h1:LvKtzl2RqO4gyF27BiXU+nKAjcV8f38U+kP/q2vgxh0=
+golang.org/x/sys v0.45.0 h1:dO4czNzziLiiXplLQgBCEpCvXQ3dnkn0SdaZSYdQ+FY=
+golang.org/x/sys v0.45.0/go.mod h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=
+tractor.dev/wanix v0.0.0-20260801063314-6594fe3763eb h1:1pcEuFhWAGAqdDMFMjtXRXEX9BqWwoIsV01lTw2GWY4=
+tractor.dev/wanix v0.0.0-20260801063314-6594fe3763eb/go.mod h1:rMSGWM4e10DZN7Ux+w7kF7hvf0RAbuLPw0tcYE1cwmw=

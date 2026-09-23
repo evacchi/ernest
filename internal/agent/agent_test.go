@@ -1,0 +1,98 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"strings"
+	"testing"
+
+	"github.com/evacchi/ernest/internal/llm"
+)
+
+// scripted replies with a fixed sequence of messages.
+type scripted struct {
+	replies []llm.Message
+	reqs    []llm.Request
+}
+
+func (s *scripted) Stream(_ context.Context, req llm.Request, onDelta func(string)) (llm.Message, error) {
+	s.reqs = append(s.reqs, req)
+	msg := s.replies[0]
+	s.replies = s.replies[1:]
+	onDelta(msg.Content)
+	return msg, nil
+}
+
+type echo struct{}
+
+func (echo) Spec() llm.ToolSpec { return llm.ToolSpec{Name: "echo"} }
+
+func (echo) Run(_ context.Context, args json.RawMessage) (string, error) {
+	return string(args), nil
+}
+
+// guard blocks calls whose args contain "rm" and uppercases results.
+type guard struct{}
+
+func (guard) OnToolCall(_ context.Context, c llm.ToolCall) (Decision, error) {
+	if strings.Contains(c.Args, "rm") {
+		return Decision{Verdict: Block, Reason: "no rm"}, nil
+	}
+	return Decision{}, nil
+}
+
+func (guard) OnToolResult(_ context.Context, _ llm.ToolCall, out string) (string, error) {
+	return strings.ToUpper(out), nil
+}
+
+func toolTurn(calls ...llm.ToolCall) llm.Message {
+	return llm.Message{Role: llm.RoleAssistant, ToolCalls: calls}
+}
+
+func TestPrompt(t *testing.T) {
+	p := &scripted{replies: []llm.Message{
+		toolTurn(
+			llm.ToolCall{ID: "1", Name: "echo", Args: `{"s":"hi"}`},
+			llm.ToolCall{ID: "2", Name: "echo", Args: `{"s":"rm"}`},
+			llm.ToolCall{ID: "3", Name: "nope"},
+		),
+		{Role: llm.RoleAssistant, Content: "done"},
+	}}
+
+	var text strings.Builder
+	emit := func(e Event) {
+		if e.Kind == EventDelta {
+			text.WriteString(e.Text)
+		}
+	}
+
+	a := New(p, "sys", []Tool{echo{}}, []Hook{guard{}}, emit)
+	if err := a.Prompt(context.Background(), "go"); err != nil {
+		t.Fatal(err)
+	}
+
+	if text.String() != "done" {
+		t.Errorf("streamed = %q", text.String())
+	}
+
+	// system, user, assistant(calls), 3 tool results, assistant(done)
+	h := a.History()
+	if len(h) != 7 {
+		t.Fatalf("history len = %d: %+v", len(h), h)
+	}
+
+	want := map[string]string{
+		"1": `{"S":"HI"}`,
+		"2": "blocked: no rm",
+		"3": `error: unknown tool "nope"`,
+	}
+	for _, m := range h[3:6] {
+		if m.Role != llm.RoleTool || m.Content != want[m.ToolCallID] {
+			t.Errorf("tool msg %s = %q, want %q", m.ToolCallID, m.Content, want[m.ToolCallID])
+		}
+	}
+
+	if len(p.reqs[1].Messages) != 6 {
+		t.Errorf("second request sent %d messages", len(p.reqs[1].Messages))
+	}
+}
