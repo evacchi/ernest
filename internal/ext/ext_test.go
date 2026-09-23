@@ -25,10 +25,26 @@ func build(t *testing.T, pkg string) string {
 	return out
 }
 
+// fakeSession is an in-memory Session backing store.
+type fakeSession struct{ model string }
+
+func (f *fakeSession) session() Session {
+	return Session{
+		Model:    func() string { return f.model },
+		SetModel: func(m string) error { f.model = m; return nil },
+		History:  func() []llm.Message { return nil },
+	}
+}
+
 func load(t *testing.T, pkg, workdir string) *Plugin {
 	t.Helper()
+	return loadWith(t, pkg, workdir, &fakeSession{model: "m1"})
+}
+
+func loadWith(t *testing.T, pkg, workdir string, fs *fakeSession) *Plugin {
+	t.Helper()
 	ctx := context.Background()
-	h := NewHost(workdir, Session{Model: "m1", History: func() []llm.Message { return nil }}, &bytes.Buffer{})
+	h := NewHost(workdir, fs.session(), &bytes.Buffer{})
 	t.Cleanup(func() { h.Close(ctx) })
 
 	p, err := h.Load(ctx, build(t, pkg))
@@ -78,6 +94,14 @@ func TestProbeVFS(t *testing.T) {
 		t.Errorf("model = %q, %v", out, err)
 	}
 
+	if _, err := tools["setmodel"].Run(ctx, []byte(`{}`)); err != nil {
+		t.Errorf("setmodel: %v", err)
+	}
+	out, err = tools["model"].Run(ctx, []byte(`{}`))
+	if err != nil || out != "m2" {
+		t.Errorf("model after write = %q, %v", out, err)
+	}
+
 	out, err = tools["touch"].Run(ctx, []byte(`{}`))
 	if err != nil || out != "hi" {
 		t.Errorf("touch = %q, %v", out, err)
@@ -94,5 +118,27 @@ func TestProbeVFS(t *testing.T) {
 	_, err = p.do(ctx, request{Op: opCall, Name: "nope"})
 	if err == nil || !strings.Contains(err.Error(), "unknown tool") {
 		t.Errorf("unknown tool err = %v", err)
+	}
+}
+
+// The /model demo: a slash command implemented purely with file I/O.
+func TestModelCommand(t *testing.T) {
+	ctx := context.Background()
+	fs := &fakeSession{model: "m1"}
+	p := loadWith(t, "../../examples/model", t.TempDir(), fs)
+
+	if len(p.Commands()) != 1 || p.Commands()[0].Name() != "model" {
+		t.Fatalf("commands = %+v", p.Commands())
+	}
+	cmd := p.Commands()[0]
+
+	out, err := cmd.Run(ctx, "")
+	if err != nil || !strings.Contains(out, "m1") {
+		t.Errorf("show = %q, %v", out, err)
+	}
+
+	out, err = cmd.Run(ctx, "gpt-6-luna")
+	if err != nil || fs.model != "gpt-6-luna" || !strings.Contains(out, "gpt-6-luna") {
+		t.Errorf("set = %q, %v, model %q", out, err, fs.model)
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/evacchi/ernest/internal/llm"
 )
@@ -45,6 +46,9 @@ type Config struct {
 type Client struct {
 	cfg  Config
 	http *http.Client
+
+	mu    sync.RWMutex
+	model string
 }
 
 // New returns a client. Empty BaseURL means DefaultBaseURL.
@@ -52,7 +56,27 @@ func New(cfg Config) *Client {
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = DefaultBaseURL
 	}
-	return &Client{cfg: cfg, http: &http.Client{}}
+	return &Client{cfg: cfg, http: &http.Client{}, model: cfg.Model}
+}
+
+// Model returns the model used for the next request.
+func (c *Client) Model() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.model
+}
+
+// SetModel switches the model; in-flight requests keep the old one.
+func (c *Client) SetModel(m string) error {
+	m = strings.TrimSpace(m)
+	if m == "" {
+		return errors.New("openai: empty model name")
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.model = m
+	return nil
 }
 
 // Stream sends req and assembles the streamed reply.
@@ -159,7 +183,7 @@ func (a *accumulator) message() llm.Message {
 }
 
 func (c *Client) encode(req llm.Request) wireRequest {
-	out := wireRequest{Model: c.cfg.Model, Stream: true}
+	out := wireRequest{Model: c.Model(), Stream: true}
 
 	for _, m := range req.Messages {
 		wm := wireMessage{Role: string(m.Role), Content: m.Content, ToolCallID: m.ToolCallID}

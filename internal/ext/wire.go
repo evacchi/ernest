@@ -11,11 +11,14 @@ import "encoding/json"
 //	← {"id":2,"output":"cba"}
 //	→ {"id":3,"op":"hook","event":"tool_call","call":{"id":"c1","name":"bash","args":"..."}}
 //	← {"id":3,"block":true,"reason":"no rm -rf"}
+//	→ {"id":4,"op":"command","name":"model","input":"gpt-5"}
+//	← {"id":4,"output":"model: gpt-5"}
 
 const (
 	opDescribe = "describe"
 	opCall     = "call"
 	opHook     = "hook"
+	opCommand  = "command"
 
 	eventToolCall   = "tool_call"
 	eventToolResult = "tool_result"
@@ -29,22 +32,29 @@ type request struct {
 	Event  string          `json:"event,omitempty"`
 	Call   *wireCall       `json:"call,omitempty"`
 	Output *string         `json:"output,omitempty"`
+	Input  string          `json:"input,omitempty"`
 }
 
 type reply struct {
-	ID     int        `json:"id"`
-	Error  string     `json:"error,omitempty"`
-	Tools  []wireTool `json:"tools,omitempty"`
-	Hooks  []string   `json:"hooks,omitempty"`
-	Output *string    `json:"output,omitempty"`
-	Block  bool       `json:"block,omitempty"`
-	Reason string     `json:"reason,omitempty"`
+	ID       int           `json:"id"`
+	Error    string        `json:"error,omitempty"`
+	Tools    []wireTool    `json:"tools,omitempty"`
+	Hooks    []string      `json:"hooks,omitempty"`
+	Commands []wireCommand `json:"commands,omitempty"`
+	Output   *string       `json:"output,omitempty"`
+	Block    bool          `json:"block,omitempty"`
+	Reason   string        `json:"reason,omitempty"`
 }
 
 type wireTool struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	Parameters  json.RawMessage `json:"parameters"`
+}
+
+type wireCommand struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
 }
 
 type wireCall struct {

@@ -23,10 +23,12 @@ import (
 
 const wasmExt = ".wasm"
 
-// Session is the agent state exposed read-only under /agent.
+// Session is the agent state exposed under /agent. SetModel is invoked
+// when a guest writes /agent/config/model.
 type Session struct {
-	Model   string
-	History func() []llm.Message
+	Model    func() string
+	SetModel func(string) error
+	History  func() []llm.Message
 }
 
 // Host loads extensions and owns their lifetimes.

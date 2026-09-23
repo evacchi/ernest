@@ -43,8 +43,9 @@ type Plugin struct {
 	mu     sync.Mutex // one request in flight
 	nextID int
 
-	tools []*Tool
-	hooks map[string]bool
+	tools    []*Tool
+	commands []*Command
+	hooks    map[string]bool
 }
 
 // start boots the guest in its own goroutine and runs describe.
@@ -192,6 +193,9 @@ func (p *Plugin) describe(ctx context.Context) error {
 		spec := llm.ToolSpec{Name: t.Name, Description: t.Description, Params: t.Parameters}
 		p.tools = append(p.tools, &Tool{p: p, spec: spec})
 	}
+	for _, c := range r.Commands {
+		p.commands = append(p.commands, &Command{p: p, name: c.Name, desc: c.Description})
+	}
 	for _, h := range r.Hooks {
 		p.hooks[h] = true
 	}
@@ -212,6 +216,9 @@ func (p *Plugin) Name() string { return p.name }
 
 // Tools returns the tools the guest declared.
 func (p *Plugin) Tools() []*Tool { return p.tools }
+
+// Commands returns the slash commands the guest declared.
+func (p *Plugin) Commands() []*Command { return p.commands }
 
 // OnToolCall asks the guest whether call may run.
 func (p *Plugin) OnToolCall(ctx context.Context, call llm.ToolCall) (agent.Decision, error) {
@@ -260,6 +267,28 @@ func (t *Tool) Spec() llm.ToolSpec { return t.spec }
 
 func (t *Tool) Run(ctx context.Context, args json.RawMessage) (string, error) {
 	r, err := t.p.do(ctx, request{Op: opCall, Name: t.spec.Name, Args: args})
+	if err != nil {
+		return "", err
+	}
+	if r.Output == nil {
+		return "", nil
+	}
+	return *r.Output, nil
+}
+
+// Command is a guest-provided slash command, e.g. "/model gpt-5".
+type Command struct {
+	p    *Plugin
+	name string
+	desc string
+}
+
+func (c *Command) Name() string        { return c.name }
+func (c *Command) Description() string { return c.desc }
+
+// Run executes the command with the text after its name.
+func (c *Command) Run(ctx context.Context, input string) (string, error) {
+	r, err := c.p.do(ctx, request{Op: opCommand, Name: c.name, Input: input})
 	if err != nil {
 		return "", err
 	}

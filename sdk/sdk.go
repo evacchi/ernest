@@ -10,8 +10,9 @@
 //	}
 //
 // Serve answers JSON-lines requests on /agent/rpc until the host closes it.
-// The guest also sees /work (the workspace, copy-on-write) and read-only
-// /agent/model and /agent/history.
+// The guest also sees /work (the workspace, copy-on-write), read-only
+// /agent/history and /agent/config/model, which switches the model when
+// written.
 package sdk
 
 import (
@@ -29,6 +30,7 @@ const (
 	opDescribe = "describe"
 	opCall     = "call"
 	opHook     = "hook"
+	opCommand  = "command"
 
 	eventToolCall   = "tool_call"
 	eventToolResult = "tool_result"
@@ -36,6 +38,10 @@ const (
 
 // ToolFunc runs a tool with its raw JSON arguments.
 type ToolFunc func(args json.RawMessage) (string, error)
+
+// CommandFunc runs a slash command with the text after its name,
+// e.g. "gpt-5" for "/model gpt-5".
+type CommandFunc func(input string) (string, error)
 
 // Call is a pending or finished tool call. Args is raw JSON.
 type Call struct {
@@ -65,8 +71,15 @@ type tool struct {
 	fn          ToolFunc
 }
 
+type command struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	fn          CommandFunc
+}
+
 var (
 	tools    []tool
+	commands []command
 	onCall   func(Call) Decision
 	onResult func(Call, string) string
 )
@@ -74,6 +87,11 @@ var (
 // Tool registers a tool. schema is a JSON schema for its arguments.
 func Tool(name, description, schema string, fn ToolFunc) {
 	tools = append(tools, tool{Name: name, Description: description, Parameters: json.RawMessage(schema), fn: fn})
+}
+
+// Command registers a slash command for the user, e.g. "/model".
+func Command(name, description string, fn CommandFunc) {
+	commands = append(commands, command{Name: name, Description: description, fn: fn})
 }
 
 // OnToolCall registers a hook run before every tool call.
@@ -90,13 +108,15 @@ type request struct {
 	Event  string          `json:"event"`
 	Call   Call            `json:"call"`
 	Output string          `json:"output"`
+	Input  string          `json:"input"`
 }
 
 type reply struct {
 	ID     int      `json:"id"`
 	Error  string   `json:"error,omitempty"`
 	Tools  []tool   `json:"tools,omitempty"`
-	Hooks  []string `json:"hooks,omitempty"`
+	Hooks    []string  `json:"hooks,omitempty"`
+	Commands []command `json:"commands,omitempty"`
 	Output *string  `json:"output,omitempty"`
 	Block  bool     `json:"block,omitempty"`
 	Reason string   `json:"reason,omitempty"`
@@ -138,6 +158,7 @@ func handle(req request) reply {
 	case opDescribe:
 		r.Tools = tools
 		r.Hooks = hooks()
+		r.Commands = commands
 
 	case opCall:
 		out, err := call(req.Name, req.Args)
@@ -149,6 +170,14 @@ func handle(req request) reply {
 
 	case opHook:
 		hook(req, &r)
+
+	case opCommand:
+		out, err := runCommand(req.Name, req.Input)
+		if err != nil {
+			r.Error = err.Error()
+			return r
+		}
+		r.Output = &out
 
 	default:
 		r.Error = "unknown op " + req.Op
@@ -174,6 +203,15 @@ func call(name string, args json.RawMessage) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("unknown tool %q", name)
+}
+
+func runCommand(name, input string) (string, error) {
+	for _, c := range commands {
+		if c.Name == name {
+			return c.fn(input)
+		}
+	}
+	return "", fmt.Errorf("unknown command %q", name)
 }
 
 func hook(req request, r *reply) {

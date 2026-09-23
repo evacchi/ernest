@@ -10,9 +10,12 @@ import (
 )
 
 func main() {
-	sdk.Tool("model", "Read /agent/model.", `{}`, func(json.RawMessage) (string, error) {
-		b, err := os.ReadFile("/agent/model")
-		return string(b), err
+	sdk.Tool("model", "Read /agent/config/model.", `{}`, func(json.RawMessage) (string, error) {
+		b, err := os.ReadFile("/agent/config/model")
+		return strings.TrimSpace(string(b)), err
+	})
+	sdk.Tool("setmodel", "Write /agent/config/model.", `{}`, func(args json.RawMessage) (string, error) {
+		return "", os.WriteFile("/agent/config/model", []byte("m2\n"), 0o644)
 	})
 	sdk.Tool("touch", "Write /work/probe.txt, read it back.", `{}`, func(json.RawMessage) (string, error) {
 		if err := os.WriteFile("/work/probe.txt", []byte("hi"), 0o644); err != nil {
