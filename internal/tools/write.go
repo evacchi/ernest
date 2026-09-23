@@ -3,7 +3,9 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -25,6 +27,7 @@ const writeSchema = `{
 }`
 
 // Write creates or overwrites a file, creating parent directories.
+// Overwrites return a unified diff against the previous content.
 type Write struct{}
 
 type writeArgs struct {
@@ -42,11 +45,21 @@ func (Write) Run(_ context.Context, args json.RawMessage) (string, error) {
 		return "", err
 	}
 
+	prev, err := os.ReadFile(in.Path)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return "", err
+	}
+	existed := err == nil
+
 	if err := os.MkdirAll(filepath.Dir(in.Path), dirPerm); err != nil {
 		return "", err
 	}
 	if err := os.WriteFile(in.Path, []byte(in.Content), filePerm); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("wrote %d bytes to %s", len(in.Content), in.Path), nil
+
+	if !existed {
+		return fmt.Sprintf("created %s (%d bytes)", in.Path, len(in.Content)), nil
+	}
+	return unified(in.Path, string(prev), in.Content), nil
 }

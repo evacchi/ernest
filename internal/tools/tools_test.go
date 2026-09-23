@@ -49,6 +49,24 @@ func TestEdit(t *testing.T) {
 	}
 }
 
+func TestEditReturnsDiff(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "f.go")
+	if err := os.WriteFile(path, []byte("1\n2\n3\n4\n5\n6\n7\n8\n"), filePerm); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := run(t, Edit{}, editArgs{Path: path, Old: "6\n", New: "six\n"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, want := range []string{"+++ b/" + path, "@@ -3,6 +3,6 @@", "-6\n+six\n"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("diff missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestRead(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "f.txt")
 	if err := os.WriteFile(path, []byte("1\n2\n3\n4"), filePerm); err != nil {

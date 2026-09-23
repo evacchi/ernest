@@ -1,18 +1,16 @@
 // Command ernest is a minimal coding agent.
 //
-//	ernest              interactive REPL
+//	ernest              interactive UI
 //	ernest -p "prompt"  one prompt, then exit
 package main
 
 import (
-	"bufio"
 	"context"
-	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
-	"strings"
 	"sync/atomic"
 
 	"github.com/evacchi/ernest/internal/agent"
@@ -20,6 +18,7 @@ import (
 	"github.com/evacchi/ernest/internal/llm"
 	"github.com/evacchi/ernest/internal/llm/openai"
 	"github.com/evacchi/ernest/internal/tools"
+	"github.com/evacchi/ernest/internal/ui"
 )
 
 const (
@@ -27,10 +26,8 @@ const (
 	envBaseURL = "OPENAI_BASE_URL"
 	envModel   = "ERNEST_MODEL"
 
-	defaultModel = "gpt-5"
+	defaultModel = "gpt-6-luna"
 	extDir       = ".ernest/extensions"
-	promptMark   = "> "
-	previewLen   = 200
 )
 
 const systemPrompt = `You are ernest, a minimal coding agent.
@@ -59,21 +56,31 @@ func run() error {
 		return err
 	}
 
-	a, host, err := assemble(*model, key, wd)
+	// One-shot: plain rendering, Ctrl-C cancels the prompt.
+	if *oneShot != "" {
+		a, host, err := assemble(*model, key, wd, ui.NewPrinter().Emit, os.Stderr)
+		if err != nil {
+			return err
+		}
+		defer host.Close(context.Background())
+
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+		defer stop()
+		return a.Prompt(ctx, *oneShot)
+	}
+
+	app := ui.NewApp(*model)
+	a, host, err := assemble(*model, key, wd, app.Emit, app.Log())
 	if err != nil {
 		return err
 	}
 	defer host.Close(context.Background())
-
-	if *oneShot != "" {
-		return prompt(a, *oneShot)
-	}
-	return repl(a)
+	return app.Run(a.Prompt)
 }
 
 // assemble wires provider, built-in tools and extensions into an agent.
 // Extensions read history lazily, after the agent exists.
-func assemble(model, key, wd string) (*agent.Agent, *ext.Host, error) {
+func assemble(model, key, wd string, emit func(agent.Event), log io.Writer) (*agent.Agent, *ext.Host, error) {
 	var current atomic.Pointer[agent.Agent]
 	session := ext.Session{
 		Model: model,
@@ -85,7 +92,7 @@ func assemble(model, key, wd string) (*agent.Agent, *ext.Host, error) {
 		},
 	}
 
-	host := ext.NewHost(wd, session, os.Stderr)
+	host := ext.NewHost(wd, session, log)
 	plugins, err := host.LoadDir(context.Background(), extDir)
 	if err != nil {
 		host.Close(context.Background())
@@ -102,67 +109,9 @@ func assemble(model, key, wd string) (*agent.Agent, *ext.Host, error) {
 	}
 
 	provider := openai.New(openai.Config{BaseURL: os.Getenv(envBaseURL), APIKey: key, Model: model})
-	a := agent.New(provider, fmt.Sprintf(systemPrompt, wd), ts, hooks, printEvent)
+	a := agent.New(provider, fmt.Sprintf(systemPrompt, wd), ts, hooks, emit)
 	current.Store(a)
 	return a, host, nil
-}
-
-// repl reads one prompt per line until EOF.
-func repl(a *agent.Agent) error {
-	sc := bufio.NewScanner(os.Stdin)
-	for {
-		fmt.Print(promptMark)
-		if !sc.Scan() {
-			return sc.Err()
-		}
-
-		line := strings.TrimSpace(sc.Text())
-		if line == "" {
-			continue
-		}
-
-		// A failed prompt is reported; the session goes on.
-		if err := prompt(a, line); err != nil {
-			fmt.Fprintln(os.Stderr, "error:", err)
-		}
-	}
-}
-
-// prompt runs one prompt; Ctrl-C cancels it without leaving the REPL.
-func prompt(a *agent.Agent, text string) error {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
-
-	err := a.Prompt(ctx, text)
-	if errors.Is(err, context.Canceled) {
-		return errors.New("interrupted")
-	}
-	return err
-}
-
-// printEvent streams text to stdout and tool activity to stderr.
-func printEvent(e agent.Event) {
-	switch e.Kind {
-	case agent.EventDelta:
-		fmt.Print(e.Text)
-	case agent.EventMessage:
-		if e.Text != "" {
-			fmt.Println()
-		}
-	case agent.EventToolCall:
-		fmt.Fprintf(os.Stderr, "→ %s %s\n", e.Call.Name, preview(e.Call.Args))
-	case agent.EventToolResult:
-		fmt.Fprintf(os.Stderr, "  %s\n", preview(e.Text))
-	}
-}
-
-// preview flattens s to one line of at most previewLen bytes.
-func preview(s string) string {
-	s = strings.Join(strings.Fields(s), " ")
-	if len(s) <= previewLen {
-		return s
-	}
-	return s[:previewLen] + "…"
 }
 
 func envOr(key, fallback string) string {

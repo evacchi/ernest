@@ -6,12 +6,17 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/aymanbagabas/go-udiff"
+
 	"github.com/evacchi/ernest/internal/llm"
 )
 
 const (
 	maxOutputBytes = 50 << 10
 	truncatedNote  = "\n[truncated]"
+	noChanges      = "no changes"
+	oldPrefix      = "a/"
+	newPrefix      = "b/"
 )
 
 // truncate caps tool output so one call cannot flood the context.
@@ -33,4 +38,18 @@ func decode[T any](args json.RawMessage) (T, error) {
 
 func spec(name, desc, schema string) llm.ToolSpec {
 	return llm.ToolSpec{Name: name, Description: desc, Params: json.RawMessage(schema)}
+}
+
+// unified returns a git-style diff of path, e.g.
+//
+//	--- a/main.go
+//	+++ b/main.go
+//	@@ -1,3 +1,3 @@
+//	-old
+//	+new
+func unified(path, before, after string) string {
+	if before == after {
+		return noChanges
+	}
+	return truncate(udiff.Unified(oldPrefix+path, newPrefix+path, before, after))
 }

@@ -4,7 +4,9 @@ Minimal coding agent in Go, in the spirit of [pi](https://github.com/badlogic/pi
 OpenAI models, four built-in tools, wasm extensions.
 
 ```
- cmd/ernest ──► agent ──► llm.Provider ◄── openai (SSE)
+ cmd/ernest ──► ui (bubbletea / printer)
+      │
+      └──────► agent ──► llm.Provider ◄── openai (SSE)
                   │
                   ├──► Tool ◄── tools (read/write/edit/bash)
                   │         ◄──┐
@@ -21,7 +23,12 @@ go run ./cmd/ernest                 # REPL
 go run ./cmd/ernest -p "list files" # one-shot
 ```
 
-`-model` or `ERNEST_MODEL` picks the model (default `gpt-5`).
+Interactive mode is a [bubbletea](https://charm.land) UI: markdown via
+glamour, code and diffs highlighted with chroma. `edit`/`write` return
+unified diffs, rendered with line numbers; so is `git diff` output from
+`bash`. Keys: enter send, ctrl+j newline, esc interrupt, ctrl+d quit.
+
+`-model` or `ERNEST_MODEL` picks the model (default `gpt-6-luna`).
 `OPENAI_BASE_URL` points at any Chat Completions compatible endpoint.
 
 ## Extensions

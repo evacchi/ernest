@@ -21,7 +21,8 @@ const editSchema = `{
   "required": ["path", "old", "new"]
 }`
 
-// Edit replaces one unique occurrence of old with new.
+// Edit replaces one unique occurrence of old with new and returns the
+// change as a unified diff, so the model can verify it.
 type Edit struct{}
 
 type editArgs struct {
@@ -62,9 +63,9 @@ func (Edit) Run(_ context.Context, args json.RawMessage) (string, error) {
 		return "", fmt.Errorf("old text matches %d times; add context to make it unique", n)
 	}
 
-	text = strings.Replace(text, in.Old, in.New, 1)
-	if err := os.WriteFile(in.Path, []byte(text), info.Mode().Perm()); err != nil {
+	edited := strings.Replace(text, in.Old, in.New, 1)
+	if err := os.WriteFile(in.Path, []byte(edited), info.Mode().Perm()); err != nil {
 		return "", err
 	}
-	return "edited " + in.Path, nil
+	return unified(in.Path, text, edited), nil
 }

@@ -58,14 +58,24 @@ const (
 	EventDelta      EventKind = iota // Text: streamed assistant text chunk
 	EventMessage                     // assistant message complete
 	EventToolCall                    // Call: about to run
-	EventToolResult                  // Call + Text: result fed back to the model
+	EventToolResult                  // Call + Text + Outcome: result fed back to the model
+)
+
+// Outcome classifies a tool result.
+type Outcome int
+
+const (
+	OutcomeOK Outcome = iota
+	OutcomeError
+	OutcomeBlocked
 )
 
 // Event reports loop progress to the UI.
 type Event struct {
-	Kind EventKind
-	Text string
-	Call llm.ToolCall
+	Kind    EventKind
+	Text    string
+	Call    llm.ToolCall
+	Outcome Outcome
 }
 
 // Agent holds one conversation.
@@ -159,44 +169,48 @@ func (a *Agent) append(m llm.Message) {
 func (a *Agent) call(ctx context.Context, call llm.ToolCall) llm.Message {
 	a.emit(Event{Kind: EventToolCall, Call: call})
 
-	out := a.exec(ctx, call)
+	out, outcome := a.exec(ctx, call)
 	if out == "" {
 		out = noOutput
 	}
 
-	a.emit(Event{Kind: EventToolResult, Call: call, Text: out})
+	a.emit(Event{Kind: EventToolResult, Call: call, Text: out, Outcome: outcome})
 	return llm.Message{Role: llm.RoleTool, ToolCallID: call.ID, Content: out}
 }
 
 // exec applies OnToolCall hooks, runs the tool, then OnToolResult hooks.
 // Hook failures fail closed: the model sees the error, not the output.
-func (a *Agent) exec(ctx context.Context, call llm.ToolCall) string {
+func (a *Agent) exec(ctx context.Context, call llm.ToolCall) (string, Outcome) {
 	if err := ctx.Err(); err != nil {
-		return errorPrefix + err.Error()
+		return failed(err)
 	}
 
 	for _, h := range a.hooks {
 		d, err := h.OnToolCall(ctx, call)
 		if err != nil {
-			return errorPrefix + "hook: " + err.Error()
+			return failed(fmt.Errorf("hook: %w", err))
 		}
 		if d.Verdict == Block {
-			return "blocked: " + d.Reason
+			return "blocked: " + d.Reason, OutcomeBlocked
 		}
 	}
 
 	out, err := a.run(ctx, call)
 	if err != nil {
-		return errorPrefix + err.Error()
+		return failed(err)
 	}
 
 	for _, h := range a.hooks {
 		out, err = h.OnToolResult(ctx, call, out)
 		if err != nil {
-			return errorPrefix + "hook: " + err.Error()
+			return failed(fmt.Errorf("hook: %w", err))
 		}
 	}
-	return out
+	return out, OutcomeOK
+}
+
+func failed(err error) (string, Outcome) {
+	return errorPrefix + err.Error(), OutcomeError
 }
 
 func (a *Agent) run(ctx context.Context, call llm.ToolCall) (string, error) {
