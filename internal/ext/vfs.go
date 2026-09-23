@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io/fs"
 	"strings"
+	"time"
 
 	"tractor.dev/wanix/fs/cowfs"
 	"tractor.dev/wanix/fs/fskit"
@@ -19,10 +20,13 @@ const (
 	dirConfig  = "config"
 	fileRPC    = "rpc"
 	fileModel  = "model"
+	fileModels = "models"
 	fileHist   = "history"
 	readOnly   = 0o444
 	readWrite  = 0o644
 	blockingIO = true
+
+	modelsTimeout = 10 * time.Second
 )
 
 // namespace builds the guest's whole file system:
@@ -31,6 +35,7 @@ const (
 //	/agent/rpc           guest end of the RPC pipe
 //	/agent/history       conversation so far, JSON
 //	/agent/config/model  current model; writing it switches the model
+//	/agent/config/models available models, one per line
 func namespace(workdir string, s Session, rpc *pipe.PortFile) (fs.FS, error) {
 	base, err := localfs.New(workdir)
 	if err != nil {
@@ -43,10 +48,23 @@ func namespace(workdir string, s Session, rpc *pipe.PortFile) (fs.FS, error) {
 			fileRPC:  fskit.OpenFunc(func(context.Context, string) (fs.File, error) { return rpc, nil }),
 			fileHist: computed(fileHist, func() ([]byte, error) { return json.Marshal(s.History()) }),
 			dirConfig: fskit.MapFS{
-				fileModel: setting(fileModel, s.Model, s.SetModel),
+				fileModel:  setting(fileModel, s.Model, s.SetModel),
+				fileModels: computed(fileModels, func() ([]byte, error) { return lines(s.Models) }),
 			},
 		},
 	}, nil
+}
+
+// lines runs list with a timeout and joins the result one per line.
+func lines(list func(context.Context) ([]string, error)) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), modelsTimeout)
+	defer cancel()
+
+	items, err := list(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return []byte(strings.Join(items, "\n") + "\n"), nil
 }
 
 // computed is a read-only file whose content fn produces on every read.

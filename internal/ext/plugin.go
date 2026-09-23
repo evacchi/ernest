@@ -286,14 +286,24 @@ type Command struct {
 func (c *Command) Name() string        { return c.name }
 func (c *Command) Description() string { return c.desc }
 
+// Result is a command's reply: text to show, or choices to pick from.
+// Picking one re-runs the command with it as input.
+type Result struct {
+	Output   string
+	Choices  []string
+	Selected string
+}
+
 // Run executes the command with the text after its name.
-func (c *Command) Run(ctx context.Context, input string) (string, error) {
+func (c *Command) Run(ctx context.Context, input string) (Result, error) {
 	r, err := c.p.do(ctx, request{Op: opCommand, Name: c.name, Input: input})
 	if err != nil {
-		return "", err
+		return Result{}, err
 	}
-	if r.Output == nil {
-		return "", nil
+
+	res := Result{Choices: r.Choices, Selected: r.Selected}
+	if r.Output != nil {
+		res.Output = *r.Output
 	}
-	return *r.Output, nil
+	return res, nil
 }

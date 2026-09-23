@@ -78,3 +78,18 @@ func TestStreamHTTPError(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestModels(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != modelsPath {
+			t.Errorf("%s %s", r.Method, r.URL.Path)
+		}
+		fmt.Fprint(w, `{"data":[{"id":"gpt-6-luna"},{"id":"whisper-1"}]}`)
+	}))
+	defer srv.Close()
+
+	ids, err := New(Config{BaseURL: srv.URL}).Models(context.Background())
+	if err != nil || strings.Join(ids, ",") != "gpt-6-luna,whisper-1" {
+		t.Fatalf("ids = %v, %v", ids, err)
+	}
+}

@@ -12,7 +12,7 @@
 // Serve answers JSON-lines requests on /agent/rpc until the host closes it.
 // The guest also sees /work (the workspace, copy-on-write), read-only
 // /agent/history and /agent/config/model, which switches the model when
-// written.
+// written, and /agent/config/models, one available model per line.
 package sdk
 
 import (
@@ -41,7 +41,19 @@ type ToolFunc func(args json.RawMessage) (string, error)
 
 // CommandFunc runs a slash command with the text after its name,
 // e.g. "gpt-5" for "/model gpt-5".
-type CommandFunc func(input string) (string, error)
+type CommandFunc func(input string) (Result, error)
+
+// Result is a command reply: Output to show, or Choices for the user to
+// pick from. The pick re-runs the command with it as input. Selected
+// preselects one choice.
+type Result struct {
+	Output   string
+	Choices  []string
+	Selected string
+}
+
+// Text is a Result that only shows s.
+func Text(s string) Result { return Result{Output: s} }
 
 // Call is a pending or finished tool call. Args is raw JSON.
 type Call struct {
@@ -117,6 +129,8 @@ type reply struct {
 	Tools    []tool    `json:"tools,omitempty"`
 	Hooks    []string  `json:"hooks,omitempty"`
 	Commands []command `json:"commands,omitempty"`
+	Choices  []string  `json:"choices,omitempty"`
+	Selected string    `json:"selected,omitempty"`
 	Output   *string   `json:"output,omitempty"`
 	Block    bool      `json:"block,omitempty"`
 	Reason   string    `json:"reason,omitempty"`
@@ -172,12 +186,15 @@ func handle(req request) reply {
 		hook(req, &r)
 
 	case opCommand:
-		out, err := runCommand(req.Name, req.Input)
+		res, err := runCommand(req.Name, req.Input)
 		if err != nil {
 			r.Error = err.Error()
 			return r
 		}
-		r.Output = &out
+		r.Choices, r.Selected = res.Choices, res.Selected
+		if len(res.Choices) == 0 {
+			r.Output = &res.Output
+		}
 
 	default:
 		r.Error = "unknown op " + req.Op
@@ -205,13 +222,13 @@ func call(name string, args json.RawMessage) (string, error) {
 	return "", fmt.Errorf("unknown tool %q", name)
 }
 
-func runCommand(name, input string) (string, error) {
+func runCommand(name, input string) (Result, error) {
 	for _, c := range commands {
 		if c.Name == name {
 			return c.fn(input)
 		}
 	}
-	return "", fmt.Errorf("unknown command %q", name)
+	return Result{}, fmt.Errorf("unknown command %q", name)
 }
 
 func hook(req request, r *reply) {

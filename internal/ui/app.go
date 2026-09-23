@@ -34,6 +34,7 @@ const (
 	keyEsc    = "esc"
 	keyCtrlC  = "ctrl+c"
 	keyCtrlD  = "ctrl+d"
+	keyTab    = "tab"
 	errPrefix = "ernest: "
 )
 
@@ -105,8 +106,9 @@ type (
 	logMsg   string
 	doneMsg  struct{ err error }
 	cmdMsg   struct {
-		out string
-		err error
+		name string
+		res  Result
+		err  error
 	}
 	flushedMsg struct{}
 )
@@ -122,6 +124,8 @@ type model struct {
 	running bool
 	cancel  context.CancelFunc
 	pending *llm.ToolCall
+	pick    *picker // non-nil while choosing a command argument
+	busy    string  // command in flight, e.g. "model"
 
 	stream strings.Builder // in-flight assistant markdown
 	live   string          // rendered stream
@@ -145,6 +149,9 @@ func newModel(name func() string, dark bool, prompt PromptFunc, cmds []Command) 
 		return promptNext
 	})
 	in.Placeholder = placeholder
+	// Real terminal cursor: keeps the input text free of cursor escapes,
+	// so View can color the typed "/command".
+	in.SetVirtualCursor(false)
 	in.DynamicHeight = true
 	in.MaxHeight = inputMaxHeight
 	in.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("ctrl+j", "shift+enter", "alt+enter"))
@@ -201,10 +208,15 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.onDone(msg.err)
 
 	case cmdMsg:
-		if msg.err != nil {
+		m.busy = ""
+		switch {
+		case msg.err != nil:
 			return m, m.print(m.r.errorLine(msg.err))
+		case len(msg.res.Choices) > 0:
+			m.pick = newPicker(msg.name, msg.res.Choices, msg.res.Selected)
+			return m, nil
 		}
-		return m, m.print(msg.out)
+		return m, m.print(msg.res.Output)
 
 	case logMsg:
 		return m, m.print(m.r.pal.dim.Render(string(msg)))
@@ -214,7 +226,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.flush()
 
 	case spinner.TickMsg:
-		if !m.running {
+		if !m.running && m.busy == "" {
 			return m, nil
 		}
 		var cmd tea.Cmd
@@ -229,7 +241,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // onKey handles app-level keys; the rest go to the input.
 func (m *model) onKey(k tea.KeyPressMsg) (tea.Cmd, bool) {
+	if m.pick != nil {
+		return m.onPickKey(k), true
+	}
+
 	switch k.String() {
+	case keyTab:
+		return nil, m.complete()
+
 	case keyEnter:
 		return m.submit(), true
 
@@ -258,6 +277,35 @@ func (m *model) onKey(k tea.KeyPressMsg) (tea.Cmd, bool) {
 	return nil, false
 }
 
+// onPickKey drives the picker; a pick re-runs its command with it.
+func (m *model) onPickKey(k tea.KeyPressMsg) tea.Cmd {
+	switch m.pick.key(k) {
+	case pickCancel:
+		m.pick = nil
+	case pickDone:
+		choice, _ := m.pick.choice()
+		name := m.pick.command
+		m.pick = nil
+		return tea.Batch(m.print(m.r.user(slash+name+" "+choice)), m.command(name, choice))
+	}
+	return nil
+}
+
+// complete replaces a partial "/mo" with the first matching command.
+func (m *model) complete() bool {
+	token, ok := typedCommand(m.input.Value())
+	if !ok || strings.Contains(m.input.Value(), " ") {
+		return false
+	}
+
+	names := suggest(m.cmds, strings.TrimPrefix(token, slash))
+	if len(names) == 0 {
+		return true
+	}
+	m.input.SetValue(slash + names[0] + " ")
+	return true
+}
+
 // submit starts the agent on the input text in a background command.
 func (m *model) submit() tea.Cmd {
 	text := strings.TrimSpace(m.input.Value())
@@ -279,19 +327,23 @@ func (m *model) submit() tea.Cmd {
 }
 
 // command runs a slash command in the background; /help is built in.
+// Unique prefixes resolve: "/mo" runs "/model".
 func (m *model) command(name, input string) tea.Cmd {
-	if name == cmdHelp {
-		return m.print(m.r.help(m.cmds))
-	}
-
-	c, ok := m.cmds[name]
+	resolved, ok := resolve(m.cmds, name)
 	if !ok {
 		return m.print(m.r.errorLine(fmt.Errorf("unknown command /%s (try /help)", name)))
 	}
-	return func() tea.Msg {
-		out, err := c.Run(context.Background(), input)
-		return cmdMsg{out, err}
+	if resolved == cmdHelp {
+		return m.print(m.r.help(m.cmds))
 	}
+
+	c := m.cmds[resolved]
+	m.busy = resolved
+	run := func() tea.Msg {
+		res, err := c.Run(context.Background(), input)
+		return cmdMsg{name: resolved, res: res, err: err}
+	}
+	return tea.Batch(run, m.spin.Tick)
 }
 
 func (m *model) interrupt() {
@@ -385,10 +437,52 @@ func (m *model) View() tea.View {
 		b.WriteString(m.spin.View() + " " + m.r.call(*m.pending) + "\n\n")
 	case m.running && m.stream.Len() == 0:
 		b.WriteString(m.spin.View() + " " + m.r.pal.dim.Render(thinking) + "\n\n")
+	case m.busy != "":
+		b.WriteString(m.spin.View() + " " + m.r.pal.dim.Render("running "+slash+m.busy+"…") + "\n\n")
 	}
 
 	bar := m.r.pal.dim.Render(strings.Repeat(rule, m.r.width))
-	b.WriteString(bar + "\n" + m.input.View() + "\n" + bar + "\n")
-	b.WriteString(statusIndent + m.r.pal.dim.Render(m.name()+" · "+helpLine))
-	return tea.NewView(b.String())
+	if m.pick != nil {
+		b.WriteString(bar + "\n" + m.r.picker(m.pick) + "\n" + bar + "\n")
+		b.WriteString(statusIndent + m.r.pal.dim.Render(pickerHelp))
+		return tea.NewView(b.String())
+	}
+
+	b.WriteString(bar + "\n")
+	top := strings.Count(b.String(), "\n")
+	b.WriteString(m.colorCommand(m.input.View()) + "\n" + bar + "\n")
+	b.WriteString(m.status())
+
+	v := tea.NewView(b.String())
+	if c := m.input.Cursor(); c != nil {
+		c.Y += top
+		v.Cursor = c
+	}
+	return v
+}
+
+// colorCommand paints a typed "/command" token: accent when it names or
+// uniquely prefixes a command, error color otherwise.
+func (m *model) colorCommand(view string) string {
+	token, ok := typedCommand(m.input.Value())
+	if !ok || token == slash {
+		return view
+	}
+
+	style := m.r.pal.err
+	if _, known := resolve(m.cmds, strings.TrimPrefix(token, slash)); known {
+		style = m.r.pal.user
+	}
+	return strings.Replace(view, token, style.Render(token), 1)
+}
+
+// status shows command suggestions while typing "/name", else model and help.
+func (m *model) status() string {
+	value := m.input.Value()
+	if token, ok := typedCommand(value); ok && !strings.ContainsAny(value, " \n") {
+		if names := suggest(m.cmds, strings.TrimPrefix(token, slash)); len(names) > 0 {
+			return m.r.suggestions(m.cmds, names)
+		}
+	}
+	return statusIndent + m.r.pal.dim.Render(m.name()+" · "+helpLine)
 }

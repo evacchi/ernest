@@ -32,7 +32,10 @@ func (f *fakeSession) session() Session {
 	return Session{
 		Model:    func() string { return f.model },
 		SetModel: func(m string) error { f.model = m; return nil },
-		History:  func() []llm.Message { return nil },
+		Models: func(context.Context) ([]string, error) {
+			return []string{"gpt-6-luna", "gpt-5", "whisper-1", "gpt-4o-2024-08-06", "o3", "gpt-4o-realtime-preview"}, nil
+		},
+		History: func() []llm.Message { return nil },
 	}
 }
 
@@ -132,13 +135,17 @@ func TestModelCommand(t *testing.T) {
 	}
 	cmd := p.Commands()[0]
 
-	out, err := cmd.Run(ctx, "")
-	if err != nil || !strings.Contains(out, "m1") {
-		t.Errorf("show = %q, %v", out, err)
+	// No argument: filtered chat models, current one kept and preselected.
+	res, err := cmd.Run(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(res.Choices, ","); got != "gpt-5,gpt-6-luna,m1,o3" || res.Selected != "m1" {
+		t.Errorf("choices = %s, selected %q", got, res.Selected)
 	}
 
-	out, err = cmd.Run(ctx, "gpt-6-luna")
-	if err != nil || fs.model != "gpt-6-luna" || !strings.Contains(out, "gpt-6-luna") {
-		t.Errorf("set = %q, %v, model %q", out, err, fs.model)
+	res, err = cmd.Run(ctx, "gpt-6-luna")
+	if err != nil || fs.model != "gpt-6-luna" || !strings.Contains(res.Output, "gpt-6-luna") {
+		t.Errorf("set = %+v, %v, model %q", res, err, fs.model)
 	}
 }

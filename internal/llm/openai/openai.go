@@ -22,6 +22,7 @@ const DefaultBaseURL = "https://api.openai.com/v1"
 
 const (
 	completionsPath = "/chat/completions"
+	modelsPath      = "/models"
 	toolType        = "function"
 
 	headerAuth        = "Authorization"
@@ -86,6 +87,42 @@ func (c *base) SetModel(m string) error {
 	defer c.mu.Unlock()
 	c.model = m
 	return nil
+}
+
+// Models lists the model ids the endpoint serves (GET /models).
+func (c *base) Models(ctx context.Context) ([]string, error) {
+	url := strings.TrimSuffix(c.cfg.BaseURL, "/") + modelsPath
+	hreq, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	hreq.Header.Set(headerAuth, "Bearer "+c.cfg.APIKey)
+
+	resp, err := c.http.Do(hreq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("openai: %s: %s", resp.Status, bytes.TrimSpace(msg))
+	}
+
+	var list struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		return nil, err
+	}
+
+	ids := make([]string, 0, len(list.Data))
+	for _, m := range list.Data {
+		ids = append(ids, m.ID)
+	}
+	return ids, nil
 }
 
 // post sends body as JSON to path and returns the event stream.

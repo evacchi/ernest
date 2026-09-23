@@ -13,6 +13,8 @@ import "encoding/json"
 //	← {"id":3,"block":true,"reason":"no rm -rf"}
 //	→ {"id":4,"op":"command","name":"model","input":"gpt-5"}
 //	← {"id":4,"output":"model: gpt-5"}
+//	→ {"id":5,"op":"command","name":"model"}
+//	← {"id":5,"choices":["gpt-5","gpt-6-luna"],"selected":"gpt-6-luna"}
 
 const (
 	opDescribe = "describe"
@@ -41,6 +43,8 @@ type reply struct {
 	Tools    []wireTool    `json:"tools,omitempty"`
 	Hooks    []string      `json:"hooks,omitempty"`
 	Commands []wireCommand `json:"commands,omitempty"`
+	Choices  []string      `json:"choices,omitempty"`
+	Selected string        `json:"selected,omitempty"`
 	Output   *string       `json:"output,omitempty"`
 	Block    bool          `json:"block,omitempty"`
 	Reason   string        `json:"reason,omitempty"`

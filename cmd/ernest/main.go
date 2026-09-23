@@ -38,6 +38,7 @@ type provider interface {
 	llm.Provider
 	Model() string
 	SetModel(string) error
+	Models(context.Context) ([]string, error)
 }
 
 const systemPrompt = `You are ernest, a minimal coding agent.
@@ -112,6 +113,7 @@ func assemble(p provider, wd string, emit func(agent.Event), log io.Writer) (*ag
 	session := ext.Session{
 		Model:    p.Model,
 		SetModel: p.SetModel,
+		Models:   p.Models,
 		History: func() []llm.Message {
 			if a := current.Load(); a != nil {
 				return a.History()
@@ -135,7 +137,7 @@ func assemble(p provider, wd string, emit func(agent.Event), log io.Writer) (*ag
 			ts = append(ts, t)
 		}
 		for _, c := range pl.Commands() {
-			cmds = append(cmds, ui.Command{Name: c.Name(), Description: c.Description(), Run: c.Run})
+			cmds = append(cmds, uiCommand(c))
 		}
 		hooks = append(hooks, pl)
 	}
@@ -143,6 +145,18 @@ func assemble(p provider, wd string, emit func(agent.Event), log io.Writer) (*ag
 	a := agent.New(p, fmt.Sprintf(systemPrompt, wd), ts, hooks, emit)
 	current.Store(a)
 	return a, host, cmds, nil
+}
+
+// uiCommand adapts an extension command to the UI.
+func uiCommand(c *ext.Command) ui.Command {
+	return ui.Command{
+		Name:        c.Name(),
+		Description: c.Description(),
+		Run: func(ctx context.Context, input string) (ui.Result, error) {
+			r, err := c.Run(ctx, input)
+			return ui.Result{Output: r.Output, Choices: r.Choices, Selected: r.Selected}, err
+		},
+	}
 }
 
 func envOr(key, fallback string) string {
