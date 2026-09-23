@@ -28,7 +28,17 @@ const (
 
 	defaultModel = "gpt-6-luna"
 	extDir       = ".ernest/extensions"
+
+	apiResponses = "responses"
+	apiChat      = "chat"
 )
+
+// provider is an llm.Provider whose model can change at runtime.
+type provider interface {
+	llm.Provider
+	Model() string
+	SetModel(string) error
+}
 
 const systemPrompt = `You are ernest, a minimal coding agent.
 Use the tools to read, write and edit files and to run commands.
@@ -44,6 +54,7 @@ func main() {
 func run() error {
 	model := flag.String("model", envOr(envModel, defaultModel), "model name")
 	oneShot := flag.String("p", "", "run one prompt and exit")
+	api := flag.String("api", apiResponses, "OpenAI API: responses or chat")
 	flag.Parse()
 
 	key := os.Getenv(envAPIKey)
@@ -56,9 +67,14 @@ func run() error {
 		return err
 	}
 
+	p, err := newProvider(*api, openai.Config{BaseURL: os.Getenv(envBaseURL), APIKey: key, Model: *model})
+	if err != nil {
+		return err
+	}
+
 	// One-shot: plain rendering, Ctrl-C cancels the prompt.
 	if *oneShot != "" {
-		a, host, err := assemble(*model, key, wd, ui.NewPrinter().Emit, os.Stderr)
+		a, host, _, err := assemble(p, wd, ui.NewPrinter().Emit, os.Stderr)
 		if err != nil {
 			return err
 		}
@@ -69,21 +85,33 @@ func run() error {
 		return a.Prompt(ctx, *oneShot)
 	}
 
-	app := ui.NewApp(*model)
-	a, host, err := assemble(*model, key, wd, app.Emit, app.Log())
+	app := ui.NewApp(p.Model)
+	a, host, cmds, err := assemble(p, wd, app.Emit, app.Log())
 	if err != nil {
 		return err
 	}
 	defer host.Close(context.Background())
-	return app.Run(a.Prompt)
+	return app.Run(a.Prompt, cmds)
 }
 
-// assemble wires provider, built-in tools and extensions into an agent.
-// Extensions read history lazily, after the agent exists.
-func assemble(model, key, wd string, emit func(agent.Event), log io.Writer) (*agent.Agent, *ext.Host, error) {
+func newProvider(api string, cfg openai.Config) (provider, error) {
+	switch api {
+	case apiResponses:
+		return openai.NewResponses(cfg), nil
+	case apiChat:
+		return openai.New(cfg), nil
+	}
+	return nil, fmt.Errorf("unknown -api %q: want %s or %s", api, apiResponses, apiChat)
+}
+
+// assemble wires provider, built-in tools and extensions into an agent,
+// and turns extension commands into UI slash commands. Extensions read
+// history lazily, after the agent exists.
+func assemble(p provider, wd string, emit func(agent.Event), log io.Writer) (*agent.Agent, *ext.Host, []ui.Command, error) {
 	var current atomic.Pointer[agent.Agent]
 	session := ext.Session{
-		Model: model,
+		Model:    p.Model,
+		SetModel: p.SetModel,
 		History: func() []llm.Message {
 			if a := current.Load(); a != nil {
 				return a.History()
@@ -96,22 +124,25 @@ func assemble(model, key, wd string, emit func(agent.Event), log io.Writer) (*ag
 	plugins, err := host.LoadDir(context.Background(), extDir)
 	if err != nil {
 		host.Close(context.Background())
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	ts := []agent.Tool{tools.Read{}, tools.Write{}, tools.Edit{}, tools.Bash{}}
 	var hooks []agent.Hook
-	for _, p := range plugins {
-		for _, t := range p.Tools() {
+	var cmds []ui.Command
+	for _, pl := range plugins {
+		for _, t := range pl.Tools() {
 			ts = append(ts, t)
 		}
-		hooks = append(hooks, p)
+		for _, c := range pl.Commands() {
+			cmds = append(cmds, ui.Command{Name: c.Name(), Description: c.Description(), Run: c.Run})
+		}
+		hooks = append(hooks, pl)
 	}
 
-	provider := openai.New(openai.Config{BaseURL: os.Getenv(envBaseURL), APIKey: key, Model: model})
-	a := agent.New(provider, fmt.Sprintf(systemPrompt, wd), ts, hooks, emit)
+	a := agent.New(p, fmt.Sprintf(systemPrompt, wd), ts, hooks, emit)
 	current.Store(a)
-	return a, host, nil
+	return a, host, cmds, nil
 }
 
 func envOr(key, fallback string) string {

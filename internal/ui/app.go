@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -21,8 +22,13 @@ import (
 const (
 	inputMaxHeight = 8
 	placeholder    = "Ask ernest…"
+	promptFirst    = "❯ "
+	promptNext     = "  "
+	promptWidth    = 2
+	rule           = "─"
+	statusIndent   = "  "
 	thinking       = "thinking…"
-	helpLine       = "enter send · ctrl+j newline · esc interrupt · ctrl+d quit"
+	helpLine       = "enter send · ctrl+j newline · esc interrupt · /help · ctrl+d quit"
 
 	keyEnter  = "enter"
 	keyEsc    = "esc"
@@ -41,15 +47,18 @@ type PromptFunc func(ctx context.Context, text string) error
 //	scrollback  › user prompt / ● tool results / answers
 //	──────────
 //	live        streaming answer (markdown) · spinner + running tool
-//	            › input
-//	            model · help
+//	            ────────────
+//	            ❯ input, grows to inputMaxHeight lines
+//	            ────────────
+//	              model · help
 type App struct {
-	model string
+	model func() string
 	prog  atomic.Pointer[tea.Program]
 }
 
-// NewApp returns an app labelled with the model name.
-func NewApp(model string) *App {
+// NewApp returns an app whose footer shows model(), read on every frame so
+// a switch (e.g. /model) shows up at once.
+func NewApp(model func() string) *App {
 	return &App{model: model}
 }
 
@@ -78,9 +87,9 @@ func (w logWriter) Write(b []byte) (int, error) {
 }
 
 // Run shows the UI until the user quits.
-func (a *App) Run(prompt PromptFunc) error {
+func (a *App) Run(prompt PromptFunc, cmds []Command) error {
 	dark := lipgloss.HasDarkBackground(os.Stdin, os.Stdout)
-	m := newModel(a.model, dark, prompt)
+	m := newModel(a.model, dark, prompt, cmds)
 
 	p := tea.NewProgram(m)
 	a.prog.Store(p)
@@ -92,9 +101,13 @@ func (a *App) Run(prompt PromptFunc) error {
 }
 
 type (
-	eventMsg   agent.Event
-	logMsg     string
-	doneMsg    struct{ err error }
+	eventMsg agent.Event
+	logMsg   string
+	doneMsg  struct{ err error }
+	cmdMsg   struct {
+		out string
+		err error
+	}
 	flushedMsg struct{}
 )
 
@@ -103,7 +116,8 @@ type model struct {
 	input  textarea.Model
 	spin   spinner.Model
 	prompt PromptFunc
-	name   string
+	name   func() string
+	cmds   map[string]Command
 
 	running bool
 	cancel  context.CancelFunc
@@ -118,23 +132,49 @@ type model struct {
 	flushing bool
 }
 
-func newModel(name string, dark bool, prompt PromptFunc) *model {
+func newModel(name func() string, dark bool, prompt PromptFunc, cmds []Command) *model {
+	r := newRenderer(dark)
+
 	in := textarea.New()
-	in.SetStyles(textarea.DefaultStyles(dark))
+	in.SetStyles(inputStyles(r.pal, dark))
 	in.ShowLineNumbers = false
-	in.Prompt = "› "
+	in.SetPromptFunc(promptWidth, func(info textarea.PromptInfo) string {
+		if info.LineNumber == 0 {
+			return promptFirst
+		}
+		return promptNext
+	})
 	in.Placeholder = placeholder
 	in.DynamicHeight = true
 	in.MaxHeight = inputMaxHeight
 	in.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("ctrl+j", "shift+enter", "alt+enter"))
 
+	byName := make(map[string]Command, len(cmds))
+	for _, c := range cmds {
+		byName[c.Name] = c
+	}
+
 	return &model{
-		r:      newRenderer(dark),
+		r:      r,
 		input:  in,
 		spin:   spinner.New(spinner.WithSpinner(spinner.MiniDot)),
 		prompt: prompt,
 		name:   name,
+		cmds:   byName,
 	}
+}
+
+// inputStyles drops the default cursor-line background: the input sits
+// between two rules instead, on the terminal's own background.
+func inputStyles(pal palette, dark bool) textarea.Styles {
+	s := textarea.DefaultStyles(dark)
+	for _, st := range []*textarea.StyleState{&s.Focused, &s.Blurred} {
+		st.CursorLine = lipgloss.NewStyle()
+		st.Text = lipgloss.NewStyle()
+		st.Prompt = pal.user
+		st.Placeholder = pal.dim
+	}
+	return s
 }
 
 func (m *model) Init() tea.Cmd {
@@ -159,6 +199,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case doneMsg:
 		return m, m.onDone(msg.err)
+
+	case cmdMsg:
+		if msg.err != nil {
+			return m, m.print(m.r.errorLine(msg.err))
+		}
+		return m, m.print(msg.out)
 
 	case logMsg:
 		return m, m.print(m.r.pal.dim.Render(string(msg)))
@@ -220,12 +266,32 @@ func (m *model) submit() tea.Cmd {
 	}
 	m.input.Reset()
 
+	if name, input, ok := parseSlash(text); ok {
+		return tea.Batch(m.print(m.r.user(text)), m.command(name, input))
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	m.running, m.cancel = true, cancel
 	prompt := m.prompt
 	run := func() tea.Msg { return doneMsg{prompt(ctx, text)} }
 
 	return tea.Batch(m.print(m.r.user(text)), run, m.spin.Tick)
+}
+
+// command runs a slash command in the background; /help is built in.
+func (m *model) command(name, input string) tea.Cmd {
+	if name == cmdHelp {
+		return m.print(m.r.help(m.cmds))
+	}
+
+	c, ok := m.cmds[name]
+	if !ok {
+		return m.print(m.r.errorLine(fmt.Errorf("unknown command /%s (try /help)", name)))
+	}
+	return func() tea.Msg {
+		out, err := c.Run(context.Background(), input)
+		return cmdMsg{out, err}
+	}
 }
 
 func (m *model) interrupt() {
@@ -321,7 +387,8 @@ func (m *model) View() tea.View {
 		b.WriteString(m.spin.View() + " " + m.r.pal.dim.Render(thinking) + "\n\n")
 	}
 
-	b.WriteString(m.input.View() + "\n")
-	b.WriteString(m.r.pal.dim.Render(m.name + " · " + helpLine))
+	bar := m.r.pal.dim.Render(strings.Repeat(rule, m.r.width))
+	b.WriteString(bar + "\n" + m.input.View() + "\n" + bar + "\n")
+	b.WriteString(statusIndent + m.r.pal.dim.Render(m.name()+" · "+helpLine))
 	return tea.NewView(b.String())
 }

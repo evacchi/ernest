@@ -112,14 +112,14 @@ type request struct {
 }
 
 type reply struct {
-	ID     int      `json:"id"`
-	Error  string   `json:"error,omitempty"`
-	Tools  []tool   `json:"tools,omitempty"`
+	ID       int       `json:"id"`
+	Error    string    `json:"error,omitempty"`
+	Tools    []tool    `json:"tools,omitempty"`
 	Hooks    []string  `json:"hooks,omitempty"`
 	Commands []command `json:"commands,omitempty"`
-	Output *string  `json:"output,omitempty"`
-	Block  bool     `json:"block,omitempty"`
-	Reason string   `json:"reason,omitempty"`
+	Output   *string   `json:"output,omitempty"`
+	Block    bool      `json:"block,omitempty"`
+	Reason   string    `json:"reason,omitempty"`
 }
 
 // Serve handles host requests until the host closes the pipe.

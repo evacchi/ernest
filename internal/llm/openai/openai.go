@@ -1,5 +1,5 @@
-// Package openai implements llm.Provider over the OpenAI Chat Completions API
-// with server-sent events streaming.
+// Package openai implements llm.Provider over OpenAI APIs with server-sent
+// events streaming: Responses (NewResponses) and Chat Completions (New).
 package openai
 
 import (
@@ -42,8 +42,8 @@ type Config struct {
 	Model   string
 }
 
-// Client is an llm.Provider backed by Chat Completions.
-type Client struct {
+// base holds what both APIs share: endpoint, credentials, current model.
+type base struct {
 	cfg  Config
 	http *http.Client
 
@@ -51,23 +51,32 @@ type Client struct {
 	model string
 }
 
-// New returns a client. Empty BaseURL means DefaultBaseURL.
-func New(cfg Config) *Client {
+func newBase(cfg Config) base {
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = DefaultBaseURL
 	}
-	return &Client{cfg: cfg, http: &http.Client{}, model: cfg.Model}
+	return base{cfg: cfg, http: &http.Client{}, model: cfg.Model}
+}
+
+// Client is an llm.Provider backed by Chat Completions.
+type Client struct {
+	base
+}
+
+// New returns a Chat Completions client. Empty BaseURL means DefaultBaseURL.
+func New(cfg Config) *Client {
+	return &Client{base: newBase(cfg)}
 }
 
 // Model returns the model used for the next request.
-func (c *Client) Model() string {
+func (c *base) Model() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.model
 }
 
 // SetModel switches the model; in-flight requests keep the old one.
-func (c *Client) SetModel(m string) error {
+func (c *base) SetModel(m string) error {
 	m = strings.TrimSpace(m)
 	if m == "" {
 		return errors.New("openai: empty model name")
@@ -79,17 +88,17 @@ func (c *Client) SetModel(m string) error {
 	return nil
 }
 
-// Stream sends req and assembles the streamed reply.
-func (c *Client) Stream(ctx context.Context, req llm.Request, onDelta func(string)) (llm.Message, error) {
-	body, err := json.Marshal(c.encode(req))
+// post sends body as JSON to path and returns the event stream.
+func (c *base) post(ctx context.Context, path string, body any) (io.ReadCloser, error) {
+	raw, err := json.Marshal(body)
 	if err != nil {
-		return llm.Message{}, err
+		return nil, err
 	}
 
-	url := strings.TrimSuffix(c.cfg.BaseURL, "/") + completionsPath
-	hreq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	url := strings.TrimSuffix(c.cfg.BaseURL, "/") + path
+	hreq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(raw))
 	if err != nil {
-		return llm.Message{}, err
+		return nil, err
 	}
 	hreq.Header.Set(headerAuth, "Bearer "+c.cfg.APIKey)
 	hreq.Header.Set(headerContentType, mimeJSON)
@@ -97,23 +106,23 @@ func (c *Client) Stream(ctx context.Context, req llm.Request, onDelta func(strin
 
 	resp, err := c.http.Do(hreq)
 	if err != nil {
-		return llm.Message{}, err
+		return nil, err
 	}
-	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		raw, _ := io.ReadAll(resp.Body)
-		return llm.Message{}, fmt.Errorf("openai: %s: %s", resp.Status, bytes.TrimSpace(raw))
+		defer resp.Body.Close()
+		msg, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("openai: %s: %s", resp.Status, bytes.TrimSpace(msg))
 	}
-	return readStream(resp.Body, onDelta)
+	return resp.Body, nil
 }
 
-// readStream consumes SSE lines until [DONE], e.g.
-//
-//	data: {"choices":[{"delta":{"content":"Hel"}}]}
-//	data: [DONE]
-func readStream(r io.Reader, onDelta func(string)) (llm.Message, error) {
-	var acc accumulator
+// errStreamEnd reports a stream cut before its terminal event.
+var errStreamEnd = errors.New("openai: stream ended early")
+
+// readSSE calls fn with each "data:" payload until fn reports done or the
+// stream sends [DONE] (Chat Completions' terminator).
+func readSSE(r io.Reader, fn func(data []byte) (done bool, err error)) error {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(nil, maxSSELine)
 
@@ -125,23 +134,52 @@ func readStream(r io.Reader, onDelta func(string)) (llm.Message, error) {
 
 		data = strings.TrimSpace(data)
 		if data == sseDone {
-			return acc.message(), nil
+			return nil
 		}
 
-		var chunk wireChunk
-		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			return llm.Message{}, fmt.Errorf("openai: bad chunk: %w", err)
+		done, err := fn([]byte(data))
+		if err != nil || done {
+			return err
 		}
-		if chunk.Error != nil {
-			return llm.Message{}, fmt.Errorf("openai: %s", chunk.Error.Message)
-		}
-		acc.add(chunk, onDelta)
 	}
 
 	if err := sc.Err(); err != nil {
+		return err
+	}
+	return errStreamEnd
+}
+
+// Stream sends req and assembles the streamed reply.
+func (c *Client) Stream(ctx context.Context, req llm.Request, onDelta func(string)) (llm.Message, error) {
+	body, err := c.post(ctx, completionsPath, c.encode(req))
+	if err != nil {
 		return llm.Message{}, err
 	}
-	return llm.Message{}, errors.New("openai: stream ended without [DONE]")
+	defer body.Close()
+	return readStream(body, onDelta)
+}
+
+// readStream consumes chunks until [DONE], e.g.
+//
+//	data: {"choices":[{"delta":{"content":"Hel"}}]}
+//	data: [DONE]
+func readStream(r io.Reader, onDelta func(string)) (llm.Message, error) {
+	var acc accumulator
+	err := readSSE(r, func(data []byte) (bool, error) {
+		var chunk wireChunk
+		if err := json.Unmarshal(data, &chunk); err != nil {
+			return false, fmt.Errorf("openai: bad chunk: %w", err)
+		}
+		if chunk.Error != nil {
+			return false, fmt.Errorf("openai: %s", chunk.Error.Message)
+		}
+		acc.add(chunk, onDelta)
+		return false, nil
+	})
+	if err != nil {
+		return llm.Message{}, err
+	}
+	return acc.message(), nil
 }
 
 // accumulator merges deltas. Tool calls arrive split by index:

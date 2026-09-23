@@ -23,6 +23,10 @@ type Message struct {
 	Content    string     `json:"content,omitempty"`
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
+
+	// Replay holds provider-private items (e.g. encrypted reasoning) sent
+	// back verbatim on later requests. Not part of the visible history.
+	Replay []json.RawMessage `json:"-"`
 }
 
 // ToolCall is a model request to run a tool. Args is raw JSON.

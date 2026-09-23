@@ -42,3 +42,21 @@ func TestResultLinesUnpadded(t *testing.T) {
 		}
 	}
 }
+
+func TestParseSlash(t *testing.T) {
+	tests := []struct {
+		in, name, input string
+		ok              bool
+	}{
+		{"/model", "model", "", true},
+		{"/model  gpt-6-luna ", "model", "gpt-6-luna", true},
+		{"/", "", "", false},
+		{"hello /model", "", "", false},
+	}
+	for _, tt := range tests {
+		name, input, ok := parseSlash(strings.TrimSpace(tt.in))
+		if name != tt.name || input != tt.input || ok != tt.ok {
+			t.Errorf("%q = (%q, %q, %v)", tt.in, name, input, ok)
+		}
+	}
+}

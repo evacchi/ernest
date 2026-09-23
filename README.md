@@ -6,7 +6,7 @@ OpenAI models, four built-in tools, wasm extensions.
 ```
  cmd/ernest ──► ui (bubbletea / printer)
       │
-      └──────► agent ──► llm.Provider ◄── openai (SSE)
+      └──────► agent ──► llm.Provider ◄── openai (Responses | Chat, SSE)
                   │
                   ├──► Tool ◄── tools (read/write/edit/bash)
                   │         ◄──┐
@@ -29,7 +29,9 @@ unified diffs, rendered with line numbers; so is `git diff` output from
 `bash`. Keys: enter send, ctrl+j newline, esc interrupt, ctrl+d quit.
 
 `-model` or `ERNEST_MODEL` picks the model (default `gpt-6-luna`).
-`OPENAI_BASE_URL` points at any Chat Completions compatible endpoint.
+`-api` picks the OpenAI API: `responses` (default; reasoning models with
+tools, reasoning replayed across turns) or `chat` (Chat Completions, for
+compatible endpoints set via `OPENAI_BASE_URL`).
 
 ## Extensions
 
@@ -37,7 +39,12 @@ Any `*.wasm` in `.ernest/extensions/` is loaded at startup.
 
 ```
 GOOS=wasip1 GOARCH=wasm go build -o .ernest/extensions/reverse.wasm ./examples/reverse
+GOOS=wasip1 GOARCH=wasm go build -o .ernest/extensions/model.wasm ./examples/model
 ```
+
+- `examples/reverse`: a tool plus a hook blocking `rm -rf`.
+- `examples/model`: the `/model` slash command. It only reads and writes
+  `/agent/config/model`; the host switches the provider.
 
 An extension is a long-lived WASI command. It talks to the host only through
 files; there are no custom imports or exports. The guest file system is a
@@ -45,10 +52,10 @@ files; there are no custom imports or exports. The guest file system is a
 (from [wazero-wasi-wanix](https://github.com/evacchi/wazero-wasi-wanix)):
 
 ```
-/work           workspace, copy-on-write: guest writes never reach disk
-/agent/rpc      duplex pipe to the host
-/agent/model    current model name
-/agent/history  conversation so far, JSON
+/work                workspace, copy-on-write: guest writes never reach disk
+/agent/rpc           duplex pipe to the host
+/agent/history       conversation so far, JSON
+/agent/config/model  current model; writing it switches the model
 ```
 
 ### Protocol
@@ -62,5 +69,9 @@ answers with the same `id`.
 | `call` | `{name,args}` | `{output}` or `{error}` |
 | `hook` | `{event:"tool_call",call}` | `{block?,reason?}` |
 | `hook` | `{event:"tool_result",call,output}` | `{output?}` (absent: unchanged) |
+| `command` | `{name,input}` | `{output}` or `{error}` |
+
+`describe` may also list `commands:[{name,description}]`; they show up as
+slash commands in the UI.
 
 Go extensions can use `sdk/`; see `examples/reverse`.

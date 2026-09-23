@@ -1,7 +1,7 @@
 // Package ui renders agent events in the terminal: markdown via glamour,
 // code via chroma, tool calls as compact blocks.
 //
-//	› list the go files                 user
+//	❯ list the go files                 user
 //	● bash  $ ls *.go                   tool call
 //	  │ main.go                         result, first maxBodyLines lines
 //	  │ … +12 lines
@@ -105,7 +105,7 @@ func (r *renderer) markdown(s string) string {
 }
 
 func (r *renderer) user(text string) string {
-	return r.pal.user.Render("› ") + text
+	return r.pal.user.Render(promptFirst) + text
 }
 
 func (r *renderer) errorLine(err error) string {
