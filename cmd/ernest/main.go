@@ -6,11 +6,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/signal"
+	"slices"
+	"strings"
 	"sync/atomic"
 
 	"github.com/evacchi/ernest/internal/agent"
@@ -31,6 +34,9 @@ const (
 
 	apiResponses = "responses"
 	apiChat      = "chat"
+
+	cmdReload    = "reload"
+	noExtensions = "no extensions"
 )
 
 // provider is an llm.Provider whose model can change at runtime.
@@ -75,24 +81,26 @@ func run() error {
 
 	// One-shot: plain rendering, Ctrl-C cancels the prompt.
 	if *oneShot != "" {
-		a, host, _, err := assemble(p, wd, ui.NewPrinter().Emit, os.Stderr)
+		s, err := assemble(p, wd, ui.NewPrinter().Emit, os.Stderr)
 		if err != nil {
 			return err
 		}
-		defer host.Close(context.Background())
+		defer s.host.Close(context.Background())
 
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 		defer stop()
-		return a.Prompt(ctx, *oneShot)
+		return s.agent.Prompt(ctx, *oneShot)
 	}
 
 	app := ui.NewApp(p.Model)
-	a, host, cmds, err := assemble(p, wd, app.Emit, app.Log())
+	s, err := assemble(p, wd, app.Emit, app.Log())
 	if err != nil {
 		return err
 	}
-	defer host.Close(context.Background())
-	return app.Run(a.Prompt, cmds)
+	defer s.host.Close(context.Background())
+
+	s.onReload = app.SetCommands
+	return app.Run(s.prompt, s.uiCommands(), ui.Info{Workdir: wd, Extensions: s.extensions})
 }
 
 func newProvider(api string, cfg openai.Config) (provider, error) {
@@ -105,12 +113,23 @@ func newProvider(api string, cfg openai.Config) (provider, error) {
 	return nil, fmt.Errorf("unknown -api %q: want %s or %s", api, apiResponses, apiChat)
 }
 
+// session is an assembled agent with its extensions.
+type session struct {
+	agent      *agent.Agent
+	host       *ext.Host
+	commands   []ui.Command
+	extensions []string
+
+	busy     atomic.Bool        // a prompt is running
+	onReload func([]ui.Command) // receives the new command list
+}
+
 // assemble wires provider, built-in tools and extensions into an agent,
 // and turns extension commands into UI slash commands. Extensions read
 // history lazily, after the agent exists.
-func assemble(p provider, wd string, emit func(agent.Event), log io.Writer) (*agent.Agent, *ext.Host, []ui.Command, error) {
+func assemble(p provider, wd string, emit func(agent.Event), log io.Writer) (*session, error) {
 	var current atomic.Pointer[agent.Agent]
-	session := ext.Session{
+	state := ext.Session{
 		Model:    p.Model,
 		SetModel: p.SetModel,
 		Models:   p.Models,
@@ -122,29 +141,80 @@ func assemble(p provider, wd string, emit func(agent.Event), log io.Writer) (*ag
 		},
 	}
 
-	host := ext.NewHost(wd, session, log)
+	host := ext.NewHost(wd, state, log)
 	plugins, err := host.LoadDir(context.Background(), extDir)
 	if err != nil {
 		host.Close(context.Background())
-		return nil, nil, nil, err
+		return nil, err
 	}
 
+	s := &session{host: host}
+	ts, hooks := s.use(plugins)
+	s.agent = agent.New(p, fmt.Sprintf(systemPrompt, wd), ts, hooks, emit)
+	current.Store(s.agent)
+	return s, nil
+}
+
+// use records plugins' commands and names and returns the agent's tools
+// (built-ins first, so extensions cannot shadow them) and hooks.
+func (s *session) use(plugins []*ext.Plugin) ([]agent.Tool, []agent.Hook) {
 	ts := []agent.Tool{tools.Read{}, tools.Write{}, tools.Edit{}, tools.Bash{}}
 	var hooks []agent.Hook
-	var cmds []ui.Command
+	s.commands, s.extensions = nil, nil
+
 	for _, pl := range plugins {
+		s.extensions = append(s.extensions, pl.Name())
 		for _, t := range pl.Tools() {
 			ts = append(ts, t)
 		}
 		for _, c := range pl.Commands() {
-			cmds = append(cmds, uiCommand(c))
+			s.commands = append(s.commands, uiCommand(c))
 		}
 		hooks = append(hooks, pl)
 	}
+	return ts, hooks
+}
 
-	a := agent.New(p, fmt.Sprintf(systemPrompt, wd), ts, hooks, emit)
-	current.Store(a)
-	return a, host, cmds, nil
+// prompt runs the agent, marking the session busy so /reload waits.
+func (s *session) prompt(ctx context.Context, text string) error {
+	s.busy.Store(true)
+	defer s.busy.Store(false)
+	return s.agent.Prompt(ctx, text)
+}
+
+// uiCommands is the extension commands plus the built-in /reload.
+func (s *session) uiCommands() []ui.Command {
+	reload := ui.Command{
+		Name:        cmdReload,
+		Description: "Reload extensions from " + extDir,
+		Run:         s.reload,
+	}
+	return append(slices.Clone(s.commands), reload)
+}
+
+// reload restarts every extension from extDir and swaps the agent's tools,
+// hooks and the UI commands. Refused mid-prompt: in-flight tool calls
+// would hit stopped extensions.
+func (s *session) reload(ctx context.Context, _ string) (ui.Result, error) {
+	if s.busy.Load() {
+		return ui.Result{}, errors.New("a prompt is running; reload when it finishes")
+	}
+
+	plugins, err := s.host.Reload(ctx, extDir)
+	ts, hooks := s.use(plugins)
+	s.agent.SetTools(ts, hooks)
+	if s.onReload != nil {
+		s.onReload(s.uiCommands())
+	}
+
+	loaded := noExtensions
+	if len(s.extensions) > 0 {
+		loaded = strings.Join(s.extensions, ", ")
+	}
+	if err != nil {
+		return ui.Result{}, fmt.Errorf("reloaded %s; failed: %w", loaded, err)
+	}
+	return ui.Result{Output: "reloaded " + loaded}, nil
 }
 
 // uiCommand adapts an extension command to the UI.

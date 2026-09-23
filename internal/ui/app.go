@@ -14,6 +14,7 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/term"
 
 	"github.com/evacchi/ernest/internal/agent"
 	"github.com/evacchi/ernest/internal/llm"
@@ -70,6 +71,13 @@ func (a *App) Emit(e agent.Event) {
 	}
 }
 
+// SetCommands replaces the slash commands, e.g. after /reload.
+func (a *App) SetCommands(cmds []Command) {
+	if p := a.prog.Load(); p != nil {
+		p.Send(commandsMsg(cmds))
+	}
+}
+
 // Log returns a writer for complete lines (e.g. extension output). Lines are
 // printed above the UI while it runs, to stderr otherwise.
 func (a *App) Log() io.Writer {
@@ -87,10 +95,16 @@ func (w logWriter) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
-// Run shows the UI until the user quits.
-func (a *App) Run(prompt PromptFunc, cmds []Command) error {
+// Run shows the splash banner, then the UI until the user quits.
+func (a *App) Run(prompt PromptFunc, cmds []Command, info Info) error {
 	dark := lipgloss.HasDarkBackground(os.Stdin, os.Stdout)
 	m := newModel(a.model, dark, prompt, cmds)
+
+	// The banner prints before bubbletea reports the size; ask directly.
+	if w, _, err := term.GetSize(os.Stdout.Fd()); err == nil {
+		m.r.setWidth(w)
+	}
+	m.splash = m.r.banner(a.model(), info)
 
 	p := tea.NewProgram(m)
 	a.prog.Store(p)
@@ -110,7 +124,8 @@ type (
 		res  Result
 		err  error
 	}
-	flushedMsg struct{}
+	flushedMsg  struct{}
+	commandsMsg []Command
 )
 
 type model struct {
@@ -126,6 +141,7 @@ type model struct {
 	pending *llm.ToolCall
 	pick    *picker // non-nil while choosing a command argument
 	busy    string  // command in flight, e.g. "model"
+	splash  string  // printed once on start
 
 	stream strings.Builder // in-flight assistant markdown
 	live   string          // rendered stream
@@ -156,19 +172,22 @@ func newModel(name func() string, dark bool, prompt PromptFunc, cmds []Command) 
 	in.MaxHeight = inputMaxHeight
 	in.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("ctrl+j", "shift+enter", "alt+enter"))
 
-	byName := make(map[string]Command, len(cmds))
-	for _, c := range cmds {
-		byName[c.Name] = c
-	}
-
 	return &model{
 		r:      r,
 		input:  in,
 		spin:   spinner.New(spinner.WithSpinner(spinner.MiniDot)),
 		prompt: prompt,
 		name:   name,
-		cmds:   byName,
+		cmds:   byName(cmds),
 	}
+}
+
+func byName(cmds []Command) map[string]Command {
+	m := make(map[string]Command, len(cmds))
+	for _, c := range cmds {
+		m[c.Name] = c
+	}
+	return m
 }
 
 // inputStyles drops the default cursor-line background: the input sits
@@ -185,7 +204,7 @@ func inputStyles(pal palette, dark bool) textarea.Styles {
 }
 
 func (m *model) Init() tea.Cmd {
-	return m.input.Focus()
+	return tea.Batch(m.input.Focus(), m.print(m.splash))
 }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -217,6 +236,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, m.print(msg.res.Output)
+
+	case commandsMsg:
+		m.cmds = byName(msg)
+		return m, nil
 
 	case logMsg:
 		return m, m.print(m.r.pal.dim.Render(string(msg)))

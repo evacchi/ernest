@@ -96,3 +96,23 @@ func TestPrompt(t *testing.T) {
 		t.Errorf("second request sent %d messages", len(p.reqs[1].Messages))
 	}
 }
+
+func TestSetTools(t *testing.T) {
+	p := &scripted{replies: []llm.Message{
+		toolTurn(llm.ToolCall{ID: "1", Name: "echo", Args: `{}`}),
+		{Role: llm.RoleAssistant, Content: "done"},
+	}}
+
+	a := New(p, "", nil, nil, nil)
+	a.SetTools([]Tool{echo{}}, nil)
+	if err := a.Prompt(context.Background(), "go"); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(p.reqs[0].Tools) != 1 {
+		t.Errorf("request tools = %v", p.reqs[0].Tools)
+	}
+	if got := a.History()[2].Content; got != "{}" {
+		t.Errorf("tool result = %q", got)
+	}
+}

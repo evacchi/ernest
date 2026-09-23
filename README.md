@@ -1,5 +1,7 @@
 # ernest
 
+*the importance of being harness*
+
 Minimal coding agent in Go, in the spirit of [pi](https://github.com/badlogic/pi-mono).
 OpenAI models, four built-in tools, wasm extensions.
 
@@ -36,11 +38,13 @@ compatible endpoints set via `OPENAI_BASE_URL`).
 
 ## Extensions
 
-Any `*.wasm` in `.ernest/extensions/` is loaded at startup.
+Any `*.wasm` in `.ernest/extensions/` is loaded at startup. `/reload`
+restarts them all from that directory (not while a prompt is running).
 
 ```
 GOOS=wasip1 GOARCH=wasm go build -o .ernest/extensions/reverse.wasm ./examples/reverse
 GOOS=wasip1 GOARCH=wasm go build -o .ernest/extensions/model.wasm ./examples/model
+GOOS=wasip1 GOARCH=wasm go build -o .ernest/extensions/hello.wasm ./examples/hello
 ```
 
 - `examples/reverse`: a tool plus a hook blocking `rm -rf`.
@@ -48,6 +52,8 @@ GOOS=wasip1 GOARCH=wasm go build -o .ernest/extensions/model.wasm ./examples/mod
   files under `/agent/config`; the host switches the provider. Without a
   name it returns the chat models from `/agent/config/models` as choices,
   shown as a picker.
+- `examples/hello`: the `/hello [name]` slash command, which replies with a
+  greeting.
 
 An extension is a long-lived WASI command. It talks to the host only through
 files; there are no custom imports or exports. The guest file system is a

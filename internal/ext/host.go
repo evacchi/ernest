@@ -54,21 +54,35 @@ func NewHost(workdir string, s Session, log io.Writer) *Host {
 }
 
 // LoadDir loads every *.wasm in dir. A missing dir yields no plugins.
+// A broken extension does not stop the others: their errors are joined.
 func (h *Host) LoadDir(ctx context.Context, dir string) ([]*Plugin, error) {
 	paths, err := filepath.Glob(filepath.Join(dir, "*"+wasmExt))
 	if err != nil {
 		return nil, err
 	}
 
-	var out []*Plugin
+	var (
+		out  []*Plugin
+		errs []error
+	)
 	for _, path := range paths {
 		p, err := h.Load(ctx, path)
 		if err != nil {
-			return out, err
+			errs = append(errs, err)
+			continue
 		}
 		out = append(out, p)
 	}
-	return out, nil
+	return out, errors.Join(errs...)
+}
+
+// Reload stops every running extension and loads dir again. Unchanged
+// modules come from the compilation cache.
+func (h *Host) Reload(ctx context.Context, dir string) ([]*Plugin, error) {
+	if err := h.stopAll(ctx); err != nil {
+		return nil, err
+	}
+	return h.LoadDir(ctx, dir)
 }
 
 // Load starts the extension at path and asks it to describe itself.
@@ -90,10 +104,14 @@ func (h *Host) Load(ctx context.Context, path string) (*Plugin, error) {
 
 // Close stops all extensions.
 func (h *Host) Close(ctx context.Context) error {
+	return errors.Join(h.stopAll(ctx), h.cache.Close(ctx))
+}
+
+func (h *Host) stopAll(ctx context.Context) error {
 	var errs []error
 	for _, p := range h.plugins {
 		errs = append(errs, p.close(ctx))
 	}
-	errs = append(errs, h.cache.Close(ctx))
+	h.plugins = nil
 	return errors.Join(errs...)
 }

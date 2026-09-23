@@ -149,3 +149,38 @@ func TestModelCommand(t *testing.T) {
 		t.Errorf("set = %+v, %v, model %q", res, err, fs.model)
 	}
 }
+
+// Reload replaces running extensions; the old instances stop.
+func TestReload(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	wasm := build(t, "../../examples/reverse")
+	data, err := os.ReadFile(wasm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "reverse.wasm"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fs := &fakeSession{model: "m1"}
+	h := NewHost(t.TempDir(), fs.session(), &bytes.Buffer{})
+	defer h.Close(ctx)
+
+	old, err := h.LoadDir(ctx, dir)
+	if err != nil || len(old) != 1 {
+		t.Fatalf("load = %v, %v", old, err)
+	}
+
+	fresh, err := h.Reload(ctx, dir)
+	if err != nil || len(fresh) != 1 {
+		t.Fatalf("reload = %v, %v", fresh, err)
+	}
+
+	if out, err := fresh[0].Tools()[0].Run(ctx, []byte(`{"text":"ab"}`)); err != nil || out != "ba" {
+		t.Errorf("new instance = %q, %v", out, err)
+	}
+	if _, err := old[0].Tools()[0].Run(ctx, []byte(`{"text":"ab"}`)); err == nil {
+		t.Error("old instance still answers")
+	}
+}

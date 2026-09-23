@@ -81,41 +81,62 @@ type Event struct {
 // Agent holds one conversation.
 type Agent struct {
 	provider llm.Provider
-	tools    map[string]Tool
-	specs    []llm.ToolSpec
-	hooks    []Hook
 	emit     func(Event)
 
 	mu      sync.Mutex
 	history []llm.Message
+	ts      *toolset
 }
 
-// New returns an agent. emit may be nil. On duplicate tool names the first
-// wins, so extensions cannot shadow built-ins.
+// toolset is the tools and hooks one model turn works with.
+type toolset struct {
+	tools map[string]Tool
+	specs []llm.ToolSpec
+	hooks []Hook
+}
+
+// newToolset indexes tools by name. On duplicates the first wins, so
+// extensions cannot shadow built-ins.
+func newToolset(tools []Tool, hooks []Hook) *toolset {
+	ts := &toolset{tools: make(map[string]Tool, len(tools)), hooks: hooks}
+	for _, t := range tools {
+		spec := t.Spec()
+		if _, dup := ts.tools[spec.Name]; dup {
+			continue
+		}
+		ts.tools[spec.Name] = t
+		ts.specs = append(ts.specs, spec)
+	}
+	return ts
+}
+
+// New returns an agent. emit may be nil.
 func New(p llm.Provider, system string, tools []Tool, hooks []Hook, emit func(Event)) *Agent {
 	if emit == nil {
 		emit = func(Event) {}
 	}
 
-	a := &Agent{
-		provider: p,
-		tools:    make(map[string]Tool, len(tools)),
-		hooks:    hooks,
-		emit:     emit,
-	}
-	for _, t := range tools {
-		spec := t.Spec()
-		if _, dup := a.tools[spec.Name]; dup {
-			continue
-		}
-		a.tools[spec.Name] = t
-		a.specs = append(a.specs, spec)
-	}
-
+	a := &Agent{provider: p, emit: emit, ts: newToolset(tools, hooks)}
 	if system != "" {
 		a.history = []llm.Message{{Role: llm.RoleSystem, Content: system}}
 	}
 	return a
+}
+
+// SetTools replaces tools and hooks, e.g. after reloading extensions.
+// A running prompt picks them up on its next model turn.
+func (a *Agent) SetTools(tools []Tool, hooks []Hook) {
+	ts := newToolset(tools, hooks)
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.ts = ts
+}
+
+func (a *Agent) toolset() *toolset {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.ts
 }
 
 // History returns a copy of the conversation.
@@ -130,7 +151,8 @@ func (a *Agent) Prompt(ctx context.Context, text string) error {
 	a.append(llm.Message{Role: llm.RoleUser, Content: text})
 
 	for range maxTurns {
-		req := llm.Request{Messages: a.History(), Tools: a.specs}
+		ts := a.toolset()
+		req := llm.Request{Messages: a.History(), Tools: ts.specs}
 		msg, err := a.provider.Stream(ctx, req, a.delta)
 		if err != nil {
 			return err
@@ -145,7 +167,7 @@ func (a *Agent) Prompt(ctx context.Context, text string) error {
 		// Every call gets an answer, even after cancellation, so the
 		// history stays valid for the next prompt.
 		for _, call := range msg.ToolCalls {
-			a.append(a.call(ctx, call))
+			a.append(a.call(ctx, ts, call))
 		}
 
 		if err := ctx.Err(); err != nil {
@@ -166,10 +188,10 @@ func (a *Agent) append(m llm.Message) {
 }
 
 // call runs one tool call through the hooks and returns the tool message.
-func (a *Agent) call(ctx context.Context, call llm.ToolCall) llm.Message {
+func (a *Agent) call(ctx context.Context, ts *toolset, call llm.ToolCall) llm.Message {
 	a.emit(Event{Kind: EventToolCall, Call: call})
 
-	out, outcome := a.exec(ctx, call)
+	out, outcome := ts.exec(ctx, call)
 	if out == "" {
 		out = noOutput
 	}
@@ -180,12 +202,12 @@ func (a *Agent) call(ctx context.Context, call llm.ToolCall) llm.Message {
 
 // exec applies OnToolCall hooks, runs the tool, then OnToolResult hooks.
 // Hook failures fail closed: the model sees the error, not the output.
-func (a *Agent) exec(ctx context.Context, call llm.ToolCall) (string, Outcome) {
+func (ts *toolset) exec(ctx context.Context, call llm.ToolCall) (string, Outcome) {
 	if err := ctx.Err(); err != nil {
 		return failed(err)
 	}
 
-	for _, h := range a.hooks {
+	for _, h := range ts.hooks {
 		d, err := h.OnToolCall(ctx, call)
 		if err != nil {
 			return failed(fmt.Errorf("hook: %w", err))
@@ -195,12 +217,12 @@ func (a *Agent) exec(ctx context.Context, call llm.ToolCall) (string, Outcome) {
 		}
 	}
 
-	out, err := a.run(ctx, call)
+	out, err := ts.run(ctx, call)
 	if err != nil {
 		return failed(err)
 	}
 
-	for _, h := range a.hooks {
+	for _, h := range ts.hooks {
 		out, err = h.OnToolResult(ctx, call, out)
 		if err != nil {
 			return failed(fmt.Errorf("hook: %w", err))
@@ -213,8 +235,8 @@ func failed(err error) (string, Outcome) {
 	return errorPrefix + err.Error(), OutcomeError
 }
 
-func (a *Agent) run(ctx context.Context, call llm.ToolCall) (string, error) {
-	tool, ok := a.tools[call.Name]
+func (ts *toolset) run(ctx context.Context, call llm.ToolCall) (string, error) {
+	tool, ok := ts.tools[call.Name]
 	if !ok {
 		return "", fmt.Errorf("unknown tool %q", call.Name)
 	}
