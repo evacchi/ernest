@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
+	"slices"
 	"strings"
 	"sync/atomic"
 
@@ -38,6 +40,10 @@ const (
 	keyTab    = "tab"
 	errPrefix = "ernest: "
 )
+
+// mentionRe matches a "$name" skill mention at a word start, as the
+// session expands it: "use $pdf" yes, "$HOME" or "a$pdf" no.
+var mentionRe = regexp.MustCompile(`(^|\s)\$([a-z0-9-]+)`)
 
 // PromptFunc runs one user prompt to completion.
 type PromptFunc func(ctx context.Context, text string) error
@@ -108,6 +114,7 @@ func (a *App) Run(prompt PromptFunc, cmds []Command, info Info, start string) er
 	dark := lipgloss.HasDarkBackground(os.Stdin, os.Stdout)
 	m := newModel(a.model, dark, prompt, cmds)
 	m.start = start
+	m.skills = info.Skills
 
 	// The banner prints before bubbletea reports the size; ask directly.
 	if w, _, err := term.GetSize(os.Stdout.Fd()); err == nil {
@@ -149,10 +156,11 @@ type model struct {
 	running bool
 	cancel  context.CancelFunc
 	pending *llm.ToolCall
-	pick    *picker // non-nil while choosing a command argument
-	busy    string  // command in flight, e.g. "model"
-	splash  string  // printed once on start
-	start   string  // submitted once on start
+	pick    *picker  // non-nil while choosing a command argument
+	busy    string   // command in flight, e.g. "model"
+	splash  string   // printed once on start
+	start   string   // submitted once on start
+	skills  []string // names painted when mentioned as "$name"
 
 	stream strings.Builder // in-flight assistant markdown
 	live   string          // rendered stream
@@ -250,6 +258,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case len(msg.res.Choices) > 0:
 			m.pick = newPicker(msg.name, msg.res.Choices, msg.res.Selected)
 			return m, nil
+		case msg.res.Prompt != "":
+			return m, tea.Batch(m.print(msg.res.Output), m.run(msg.res.Prompt))
 		}
 		return m, m.print(msg.res.Output)
 
@@ -366,13 +376,21 @@ func (m *model) submit() tea.Cmd {
 	if name, input, ok := parseSlash(text); ok {
 		return tea.Batch(m.print(m.r.user(text)), m.command(name, input))
 	}
+	return tea.Batch(m.print(m.r.user(text)), m.run(text))
+}
+
+// run starts the agent on text in a background command.
+func (m *model) run(text string) tea.Cmd {
+	if m.running {
+		return nil
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	m.running, m.cancel = true, cancel
 	prompt := m.prompt
 	run := func() tea.Msg { return doneMsg{prompt(ctx, text)} }
 
-	return tea.Batch(m.print(m.r.user(text)), run, m.spin.Tick)
+	return tea.Batch(run, m.spin.Tick)
 }
 
 // command runs a slash command in the background; /help is built in.
@@ -499,7 +517,7 @@ func (m *model) View() tea.View {
 
 	b.WriteString(bar + "\n")
 	top := strings.Count(b.String(), "\n")
-	b.WriteString(m.colorCommand(m.input.View()) + "\n" + bar + "\n")
+	b.WriteString(m.colorSkills(m.colorCommand(m.input.View())) + "\n" + bar + "\n")
 	b.WriteString(m.status())
 
 	v := tea.NewView(b.String())
@@ -529,6 +547,27 @@ func (m *model) colorCommand(view string) string {
 		style = m.r.pal.user
 	}
 	return strings.Replace(view, token, style.Render(token), 1)
+}
+
+// colorSkills paints "$name" mentions of known skills in accent. Unknown
+// names stay plain: "$HOME" in a prompt is fine.
+func (m *model) colorSkills(view string) string {
+	seen := map[string]bool{}
+	for _, match := range mentionRe.FindAllStringSubmatch(m.input.Value(), -1) {
+		name := match[2]
+		if seen[name] || !slices.Contains(m.skills, name) {
+			continue
+		}
+		seen[name] = true
+
+		// Whole token only: "$pdf" but not the head of "$pdf-x".
+		tok := skillMark + name
+		re := regexp.MustCompile(regexp.QuoteMeta(tok) + `([^a-z0-9-]|$)`)
+		view = re.ReplaceAllStringFunc(view, func(s string) string {
+			return m.r.pal.user.Render(tok) + s[len(tok):]
+		})
+	}
+	return view
 }
 
 // status shows command suggestions while typing "/name", else model and help.

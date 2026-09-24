@@ -10,7 +10,8 @@
 //	~/.agents/skills/<name>/SKILL.md
 //
 // AGENTS.md files are inlined. Skills are listed by name, description and
-// location only; the model reads a SKILL.md when a task calls for it.
+// location only; the model reads a SKILL.md when a task calls for it, or
+// the user mentions it as "$name" and its body is sent with the prompt.
 package prompt
 
 import (
@@ -19,6 +20,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 )
@@ -47,6 +49,10 @@ type Skill struct {
 	Description string
 	Path        string
 }
+
+// mentionRe matches "$name" at a word start; names are lowercase
+// letters, digits and hyphens, so "$HOME" or "a$b" never match.
+var mentionRe = regexp.MustCompile(`(^|\s)\$([a-z0-9-]+)`)
 
 // Context is what Load found.
 type Context struct {
@@ -259,4 +265,70 @@ func (c Context) Render() string {
 		b.WriteString("</available_skills>\n")
 	}
 	return b.String()
+}
+
+// Names lists the skills' names.
+func (c Context) Names() []string {
+	names := make([]string, 0, len(c.Skills))
+	for _, s := range c.Skills {
+		names = append(names, s.Name)
+	}
+	return names
+}
+
+// Find returns the skill called name.
+func (c Context) Find(name string) (Skill, bool) {
+	i := slices.IndexFunc(c.Skills, func(s Skill) bool { return s.Name == name })
+	if i < 0 {
+		return Skill{}, false
+	}
+	return c.Skills[i], true
+}
+
+// Expand prepends the body of each skill mentioned in text, once each.
+// Unknown mentions stay as typed:
+//
+//	"$pdf fill form.pdf"  →  <skill name="pdf" location="/s/pdf/SKILL.md">
+//	                         ...body...
+//	                         </skill>
+//
+//	                         $pdf fill form.pdf
+func (c Context) Expand(text string) (string, error) {
+	var b strings.Builder
+	seen := map[string]bool{}
+
+	for _, m := range mentionRe.FindAllStringSubmatch(text, -1) {
+		name := m[2]
+		s, ok := c.Find(name)
+		if !ok || seen[name] {
+			continue
+		}
+		seen[name] = true
+
+		body, err := s.Body()
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&b, "<skill name=%q location=%q>\n%s\n</skill>\n\n", s.Name, s.Path, body)
+	}
+	return b.String() + text, nil
+}
+
+// Body is the SKILL.md without its frontmatter.
+func (s Skill) Body() (string, error) {
+	data, err := os.ReadFile(s.Path)
+	if err != nil {
+		return "", err
+	}
+
+	text := strings.ReplaceAll(string(data), "\r\n", "\n")
+	rest, ok := strings.CutPrefix(text, fence+"\n")
+	if !ok {
+		return strings.TrimSpace(text), nil
+	}
+	_, body, ok := strings.Cut(rest, "\n"+fence)
+	if !ok {
+		return strings.TrimSpace(text), nil
+	}
+	return strings.TrimSpace(body), nil
 }

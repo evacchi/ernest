@@ -44,7 +44,11 @@ from `/` down to the working directory. It also lists
 [skills](https://agentskills.io), `<name>/SKILL.md` under
 `.ernest/skills` or `.agents/skills`, in the project or in `~`; project
 skills win name clashes. Only name, description and path go in the
-prompt; the model reads a `SKILL.md` when a task calls for it.
+prompt; the model reads a `SKILL.md` when a task calls for it. To force
+one, mention it anywhere in a prompt (`merge these with $pdf`) or run
+`/skill pdf merge these` (`/skill` alone opens a picker); its body is
+sent to the model, not saved. Known `$name` mentions are colored; the
+banner lists them.
 
 `-model` or `ERNEST_MODEL` picks the model (default `gpt-6-luna`).
 `-api` picks the OpenAI API: `responses` (default; reasoning models with

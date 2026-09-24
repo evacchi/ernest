@@ -92,3 +92,25 @@ func TestRender(t *testing.T) {
 		}
 	}
 }
+
+// Known "$name" mentions prepend the skill body, once; others stay put.
+func TestExpand(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pdf", skillFile)
+	write(t, path, "---\nname: pdf\ndescription: PDFs\n---\n\nUse pdftk.\n")
+	c := Context{Skills: []Skill{{Name: "pdf", Description: "PDFs", Path: path}}}
+
+	got, err := c.Expand("$pdf merge, then $pdf split; echo $HOME a$pdf $git")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := "<skill name=\"pdf\" location=\"" + path + "\">\nUse pdftk.\n</skill>\n\n" +
+		"$pdf merge, then $pdf split; echo $HOME a$pdf $git"
+	if got != want {
+		t.Errorf("got:\n%s\nwant:\n%s", got, want)
+	}
+
+	if plain, _ := c.Expand("no skills"); plain != "no skills" {
+		t.Errorf("plain = %q", plain)
+	}
+}

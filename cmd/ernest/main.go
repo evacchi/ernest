@@ -43,6 +43,9 @@ const (
 	cmdReload    = "reload"
 	noExtensions = "no extensions"
 
+	cmdSkill  = "skill"
+	skillMark = "$"
+
 	cmdShell    = "sh"
 	shellPrefix = "!"
 	slash       = "/"
@@ -112,7 +115,7 @@ func run() error {
 
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 		defer stop()
-		return s.agent.Prompt(ctx, *oneShot)
+		return s.prompt(ctx, *oneShot)
 	}
 
 	app := ui.NewApp(p.Model)
@@ -124,7 +127,8 @@ func run() error {
 
 	s.onReload = app.SetCommands
 	s.onResume = app.Replay
-	return app.Run(s.prompt, s.uiCommands(), ui.Info{Workdir: wd, Extensions: s.extensions}, start)
+	info := ui.Info{Workdir: wd, Extensions: s.extensions, Skills: s.project.Names()}
+	return app.Run(s.prompt, s.uiCommands(), info, start)
 }
 
 func newProvider(api string, cfg openai.Config) (provider, error) {
@@ -144,6 +148,7 @@ type session struct {
 	host       *ext.Host
 	commands   []ui.Command
 	extensions []string
+	project    prompt.Context // AGENTS.md files and skills
 
 	store *history.Store
 	id    atomic.Pointer[string]
@@ -186,7 +191,9 @@ func assemble(p provider, wd string, emit func(agent.Event), log io.Writer) (*se
 
 	s.host = host
 	ts, hooks := s.use(plugins)
-	s.agent = agent.New(p, system(wd, log), ts, hooks, emit)
+	s.project = loadContext(wd, log)
+	s.agent = agent.New(p, fmt.Sprintf(systemPrompt, wd)+s.project.Render(), ts, hooks, emit)
+	s.agent.Rewrite(s.project.Expand) // "$pdf" → skill body, not saved
 	s.agent.Record(func(m llm.Message) {
 		if err := s.store.Append(*s.id.Load(), m); err != nil {
 			fmt.Fprintln(log, "history:", err)
@@ -196,9 +203,9 @@ func assemble(p provider, wd string, emit func(agent.Event), log io.Writer) (*se
 	return s, nil
 }
 
-// system is the base prompt plus AGENTS.md files and skills. Bad files
-// are logged, not fatal.
-func system(wd string, log io.Writer) string {
+// loadContext finds AGENTS.md files and skills. Bad files are logged,
+// not fatal.
+func loadContext(wd string, log io.Writer) prompt.Context {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		fmt.Fprintln(log, "context:", err)
@@ -208,7 +215,7 @@ func system(wd string, log io.Writer) string {
 	if err != nil {
 		fmt.Fprintln(log, "context:", err)
 	}
-	return fmt.Sprintf(systemPrompt, wd) + c.Render()
+	return c
 }
 
 // resume swaps the conversation for saved session id, which later
@@ -272,8 +279,8 @@ func (s *session) prompt(ctx context.Context, text string) error {
 	return s.agent.Prompt(ctx, text)
 }
 
-// uiCommands is the extension commands plus the built-ins /reload and /sh.
-// Built-ins come last so they win name clashes.
+// uiCommands is the extension commands plus the built-ins /reload, /sh
+// and /skill. Built-ins come last so they win name clashes.
 func (s *session) uiCommands() []ui.Command {
 	reload := ui.Command{
 		Name:        cmdReload,
@@ -286,7 +293,31 @@ func (s *session) uiCommands() []ui.Command {
 		Description: "Run a shell command; the model sees it",
 		Run:         s.shell,
 	}
-	return append(slices.Clone(s.commands), reload, sh)
+	skill := ui.Command{
+		Name:        cmdSkill,
+		Description: "Run a skill: /skill name [task]",
+		Run:         s.skill,
+	}
+	return append(slices.Clone(s.commands), reload, sh, skill)
+}
+
+// skill offers the skills as choices, or prompts with the named one:
+//
+//	/skill pdf merge a.pdf b.pdf  →  prompt "$pdf merge a.pdf b.pdf"
+func (s *session) skill(_ context.Context, input string) (ui.Result, error) {
+	if input == "" {
+		names := s.project.Names()
+		if len(names) == 0 {
+			return ui.Result{}, errors.New("no skills")
+		}
+		return ui.Result{Choices: names}, nil
+	}
+
+	name, _, _ := strings.Cut(input, " ")
+	if _, ok := s.project.Find(name); !ok {
+		return ui.Result{}, fmt.Errorf("unknown skill %q", name)
+	}
+	return ui.Result{Prompt: skillMark + input}, nil
 }
 
 // shell runs a user's shell command on the host, like the bash tool,

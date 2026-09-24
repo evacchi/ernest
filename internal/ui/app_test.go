@@ -56,6 +56,44 @@ func TestCommandPrefix(t *testing.T) {
 	}
 }
 
+// A command's Prompt runs the agent, as if typed.
+func TestCommandPrompt(t *testing.T) {
+	var got string
+	prompt := func(_ context.Context, text string) error {
+		got = text
+		return nil
+	}
+	m := newModel(func() string { return "m" }, true, prompt, nil)
+
+	_, cmd := m.Update(cmdMsg{name: "skill", res: Result{Prompt: "$pdf fill"}})
+	if !m.running {
+		t.Fatal("prompt did not start")
+	}
+	runAll(cmd)
+
+	if got != "$pdf fill" {
+		t.Errorf("prompt = %q", got)
+	}
+}
+
+// Known "$skill" mentions are painted; "$HOME" and unknown ones are not.
+func TestColorSkills(t *testing.T) {
+	m := newModel(func() string { return "m" }, true, nil, nil)
+	m.skills = []string{"pdf"}
+	m.input.SetValue("use $pdf, $pdf-x and $HOME $git")
+
+	view := m.View().Content
+	pdf := m.r.pal.user.Render("$pdf")
+	if strings.Count(view, pdf) != 1 {
+		t.Errorf("want one painted $pdf in %q", view)
+	}
+	for _, plain := range []string{"$HOME", "$git"} {
+		if strings.Contains(view, m.r.pal.user.Render(plain)) {
+			t.Errorf("%s painted", plain)
+		}
+	}
+}
+
 // A start text runs on Init, as if typed: "ernest resume" runs "/resume".
 func TestStartCommand(t *testing.T) {
 	ran := false

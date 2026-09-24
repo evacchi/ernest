@@ -15,9 +15,10 @@ func TestBanner(t *testing.T) {
 	out := ansi.Strip(r.banner("gpt-6-luna", Info{
 		Workdir:    filepath.Join(home, "src", "app"),
 		Extensions: []string{"model", "reverse"},
+		Skills:     []string{"pdf", "git"},
 	}))
 
-	for _, want := range []string{"▄▄▄▄▄▄▄", "▀▀▀▀▀▀▀▀▀▀▀", "ernest", "the importance of being harness", "gpt-6-luna", "~/src/app", "model, reverse", "/help"} {
+	for _, want := range []string{"▄▄▄▄▄▄▄", "▀▀▀▀▀▀▀▀▀▀▀", "ernest", "the importance of being harness", "gpt-6-luna", "~/src/app", "model, reverse · $pdf $git", "/help"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("banner missing %q:\n%s", want, out)
 		}

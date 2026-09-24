@@ -13,6 +13,8 @@ const (
 	tagline     = "the importance of being harness"
 	noExtension = "no extensions"
 	bannerHint  = "/help for commands"
+	skillMark   = "$"
+	infoSep     = " · "
 	homePrefix  = "~"
 	ellipsis    = "…"
 
@@ -33,6 +35,7 @@ var (
 type Info struct {
 	Workdir    string
 	Extensions []string
+	Skills     []string
 }
 
 // banner is the startup splash: a top hat beside the session details,
@@ -41,7 +44,7 @@ type Info struct {
 //	╭──────────────────────────────────────────╮
 //	│   ▄▄▄▄▄▄▄    ernest  the importance of being harness │
 //	│   ███████    gpt-6-luna · ~/src/app      │
-//	│   ███████    model, reverse              │
+//	│   ███████    model, reverse · $pdf $git  │
 //	│ ▀▀▀▀▀▀▀▀▀▀▀  /help for commands          │
 //	╰──────────────────────────────────────────╯
 func (r *renderer) banner(model string, info Info) string {
@@ -57,9 +60,14 @@ func (r *renderer) banner(model string, info Info) string {
 		exts = strings.Join(info.Extensions, ", ")
 	}
 
+	// Skills as they are mentioned in a prompt: "$pdf $git".
+	if len(info.Skills) > 0 {
+		exts += infoSep + skillMark + strings.Join(info.Skills, " "+skillMark)
+	}
+
 	// Fit the text column; the path gives way from the left.
 	room := max(r.width-lipgloss.Width(hat)-len(hatGap)-boxChrome, 1)
-	where := model + " · "
+	where := model + infoSep
 	where += truncLeft(shortPath(info.Workdir), room-ansi.StringWidth(where))
 
 	text := strings.Join([]string{

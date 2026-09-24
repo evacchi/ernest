@@ -22,11 +22,13 @@ type Command struct {
 }
 
 // Result is a command reply: Output to show, or Choices to pick from.
-// The pick re-runs the command with it as input.
+// The pick re-runs the command with it as input. A Prompt, if set, is
+// sent to the agent as if typed.
 type Result struct {
 	Output   string
 	Choices  []string
 	Selected string
+	Prompt   string
 }
 
 // resolve finds a command by exact name, or by a unique prefix

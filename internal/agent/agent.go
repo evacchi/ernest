@@ -86,7 +86,8 @@ type Agent struct {
 	mu      sync.Mutex
 	history []llm.Message
 	ts      *toolset
-	record  func(llm.Message) // sees every appended message; may be nil
+	record  func(llm.Message)            // sees every appended message; may be nil
+	rewrite func(string) (string, error) // user text as sent; may be nil
 }
 
 // toolset is the tools and hooks one model turn works with.
@@ -155,6 +156,37 @@ func (a *Agent) Record(fn func(llm.Message)) {
 	a.record = fn
 }
 
+// Rewrite calls fn on each user message's text as it is sent to the
+// model, e.g. to expand "$pdf" into the skill's body. The history keeps
+// the original, so saved sessions stay small and resume re-expands.
+func (a *Agent) Rewrite(fn func(string) (string, error)) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.rewrite = fn
+}
+
+// request is the history as the model sees it: user text rewritten.
+func (a *Agent) request() ([]llm.Message, error) {
+	a.mu.Lock()
+	msgs, fn := slices.Clone(a.history), a.rewrite
+	a.mu.Unlock()
+
+	if fn == nil {
+		return msgs, nil
+	}
+	for i, m := range msgs {
+		if m.Role != llm.RoleUser {
+			continue
+		}
+		text, err := fn(m.Content)
+		if err != nil {
+			return nil, err
+		}
+		msgs[i].Content = text
+	}
+	return msgs, nil
+}
+
 // Restore replaces the conversation with msgs, keeping the system prompt.
 // Restored messages are not recorded: they are already saved.
 func (a *Agent) Restore(msgs []llm.Message) {
@@ -176,7 +208,11 @@ func (a *Agent) Prompt(ctx context.Context, text string) error {
 
 	for range maxTurns {
 		ts := a.toolset()
-		req := llm.Request{Messages: a.History(), Tools: ts.specs}
+		msgs, err := a.request()
+		if err != nil {
+			return err
+		}
+		req := llm.Request{Messages: msgs, Tools: ts.specs}
 		msg, err := a.provider.Stream(ctx, req, a.delta)
 		if err != nil {
 			return err

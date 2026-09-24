@@ -156,3 +156,22 @@ func TestRecordRestore(t *testing.T) {
 		t.Errorf("history = %+v", h)
 	}
 }
+
+// Rewrite changes user text sent to the model, not the history.
+func TestRewrite(t *testing.T) {
+	p := &scripted{replies: []llm.Message{{Role: llm.RoleAssistant, Content: "ok"}}}
+	a := New(p, "sys", nil, nil, nil)
+	a.Rewrite(func(s string) (string, error) { return "<skill>\n" + s, nil })
+
+	if err := a.Prompt(context.Background(), "$pdf go"); err != nil {
+		t.Fatal(err)
+	}
+
+	sent := p.reqs[0].Messages
+	if sent[0].Content != "sys" || sent[1].Content != "<skill>\n$pdf go" {
+		t.Errorf("sent = %+v", sent)
+	}
+	if h := a.History(); h[1].Content != "$pdf go" {
+		t.Errorf("history = %+v", h)
+	}
+}
