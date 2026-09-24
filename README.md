@@ -39,6 +39,13 @@ Typing `/` colors the command and suggests matches (tab completes).
 `!cmd` (or `/sh cmd`) runs a shell command on the host; command and
 output are added to the history, so the model sees them.
 
+The system prompt includes `~/.ernest/AGENTS.md`, then every `AGENTS.md`
+from `/` down to the working directory. It also lists
+[skills](https://agentskills.io), `<name>/SKILL.md` under
+`.ernest/skills` or `.agents/skills`, in the project or in `~`; project
+skills win name clashes. Only name, description and path go in the
+prompt; the model reads a `SKILL.md` when a task calls for it.
+
 `-model` or `ERNEST_MODEL` picks the model (default `gpt-6-luna`).
 `-api` picks the OpenAI API: `responses` (default; reasoning models with
 tools, reasoning replayed across turns) or `chat` (Chat Completions, for
