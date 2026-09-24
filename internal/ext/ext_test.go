@@ -211,3 +211,24 @@ func TestReload(t *testing.T) {
 		t.Error("old instance still answers")
 	}
 }
+
+// Compiled modules persist in the user cache dir across hosts.
+func TestDiskCache(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+
+	load(t, "../../examples/reverse", t.TempDir())
+
+	dir, err := cacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(dir, home) {
+		t.Fatalf("cache dir %s outside %s", dir, home)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) == 0 {
+		t.Errorf("cache dir empty: %v, %v", entries, err)
+	}
+}

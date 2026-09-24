@@ -23,6 +23,7 @@ import (
 	"github.com/evacchi/ernest/internal/history"
 	"github.com/evacchi/ernest/internal/llm"
 	"github.com/evacchi/ernest/internal/llm/openai"
+	"github.com/evacchi/ernest/internal/prompt"
 	"github.com/evacchi/ernest/internal/tools"
 	"github.com/evacchi/ernest/internal/ui"
 )
@@ -185,7 +186,7 @@ func assemble(p provider, wd string, emit func(agent.Event), log io.Writer) (*se
 
 	s.host = host
 	ts, hooks := s.use(plugins)
-	s.agent = agent.New(p, fmt.Sprintf(systemPrompt, wd), ts, hooks, emit)
+	s.agent = agent.New(p, system(wd, log), ts, hooks, emit)
 	s.agent.Record(func(m llm.Message) {
 		if err := s.store.Append(*s.id.Load(), m); err != nil {
 			fmt.Fprintln(log, "history:", err)
@@ -193,6 +194,21 @@ func assemble(p provider, wd string, emit func(agent.Event), log io.Writer) (*se
 	})
 	current.Store(s.agent)
 	return s, nil
+}
+
+// system is the base prompt plus AGENTS.md files and skills. Bad files
+// are logged, not fatal.
+func system(wd string, log io.Writer) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Fprintln(log, "context:", err)
+	}
+
+	c, err := prompt.Load(wd, home)
+	if err != nil {
+		fmt.Fprintln(log, "context:", err)
+	}
+	return fmt.Sprintf(systemPrompt, wd) + c.Render()
 }
 
 // resume swaps the conversation for saved session id, which later

@@ -11,6 +11,7 @@ package ext
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -21,7 +22,11 @@ import (
 	"github.com/evacchi/ernest/internal/llm"
 )
 
-const wasmExt = ".wasm"
+const (
+	wasmExt  = ".wasm"
+	cacheApp = "ernest"
+	cacheSub = "wazero"
+)
 
 // Session is the agent state exposed under /agent. SetModel is invoked
 // when a guest writes /agent/config/model; Models backs the read-only
@@ -54,8 +59,33 @@ func NewHost(workdir string, s Session, log io.Writer) *Host {
 		workdir: workdir,
 		session: s,
 		log:     log,
-		cache:   wazero.NewCompilationCache(),
+		cache:   newCache(log),
 	}
+}
+
+// newCache keeps compiled modules on disk, so restarts skip compiling
+// unchanged extensions. Entries are keyed by module and wazero version,
+// so all projects share one dir. Falls back to memory if the dir fails.
+func newCache(log io.Writer) wazero.CompilationCache {
+	dir, err := cacheDir()
+	if err == nil {
+		var c wazero.CompilationCache
+		if c, err = wazero.NewCompilationCacheWithDir(dir); err == nil {
+			return c
+		}
+	}
+
+	fmt.Fprintln(log, "wazero cache in memory:", err)
+	return wazero.NewCompilationCache()
+}
+
+// cacheDir is e.g. ~/Library/Caches/ernest/wazero on macOS.
+func cacheDir() (string, error) {
+	base, err := os.UserCacheDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, cacheApp, cacheSub), nil
 }
 
 // LoadDir loads every *.wasm in dir. A missing dir yields no plugins.

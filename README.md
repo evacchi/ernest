@@ -48,6 +48,8 @@ compatible endpoints set via `OPENAI_BASE_URL`).
 
 Any `*.wasm` in `.ernest/extensions/` is loaded at startup. `/reload`
 restarts them all from that directory (not while a prompt is running).
+Compiled modules are cached on disk (`os.UserCacheDir()/ernest/wazero`),
+so restarts skip compiling unchanged extensions.
 
 ```
 GOOS=wasip1 GOARCH=wasm go build -o .ernest/extensions/reverse.wasm ./examples/reverse
