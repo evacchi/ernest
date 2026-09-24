@@ -30,6 +30,8 @@ glamour, code and diffs highlighted with chroma. `edit`/`write` return
 unified diffs, rendered with line numbers; so is `git diff` output from
 `bash`. Keys: enter send, ctrl+j newline, esc interrupt, ctrl+d quit.
 Typing `/` colors the command and suggests matches (tab completes).
+`!cmd` (or `/sh cmd`) runs a shell command on the host; command and
+output are added to the history, so the model sees them.
 
 `-model` or `ERNEST_MODEL` picks the model (default `gpt-6-luna`).
 `-api` picks the OpenAI API: `responses` (default; reasoning models with
@@ -81,8 +83,9 @@ answers with the same `id`.
 | `hook` | `{event:"tool_result",call,output}` | `{output?}` (absent: unchanged) |
 | `command` | `{name,input}` | `{output}`, `{choices,selected?}` or `{error}` |
 
-`describe` may also list `commands:[{name,description}]`; they show up as
-slash commands in the UI. A reply with `choices` opens a picker; the pick
+`describe` may also list `commands:[{name,prefix?,description}]`; they show
+up as slash commands in the UI. A `prefix` symbol is a shorthand: `?why`
+runs `/ask why`. A reply with `choices` opens a picker; the pick
 re-runs the command with it as `input`.
 
 Go extensions can use `sdk/`; see `examples/reverse`.

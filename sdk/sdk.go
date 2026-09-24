@@ -85,6 +85,7 @@ type tool struct {
 
 type command struct {
 	Name        string `json:"name"`
+	Prefix      string `json:"prefix,omitempty"`
 	Description string `json:"description"`
 	fn          CommandFunc
 }
@@ -104,6 +105,12 @@ func Tool(name, description, schema string, fn ToolFunc) {
 // Command registers a slash command for the user, e.g. "/model".
 func Command(name, description string, fn CommandFunc) {
 	commands = append(commands, command{Name: name, Description: description, fn: fn})
+}
+
+// PrefixCommand registers a slash command that a prefix symbol also runs,
+// e.g. "?" for "/ask": "?why" runs "/ask why".
+func PrefixCommand(prefix, name, description string, fn CommandFunc) {
+	commands = append(commands, command{Name: name, Prefix: prefix, Description: description, fn: fn})
 }
 
 // OnToolCall registers a hook run before every tool call.

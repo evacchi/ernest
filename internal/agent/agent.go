@@ -177,6 +177,12 @@ func (a *Agent) Prompt(ctx context.Context, text string) error {
 	return errTooManyTurns
 }
 
+// Note adds a user message the model sees on the next prompt, without
+// running a turn, e.g. the output of a user's "!ls".
+func (a *Agent) Note(text string) {
+	a.append(llm.Message{Role: llm.RoleUser, Content: text})
+}
+
 func (a *Agent) delta(s string) {
 	a.emit(Event{Kind: EventDelta, Text: s})
 }

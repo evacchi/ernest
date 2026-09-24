@@ -194,7 +194,7 @@ func (p *Plugin) describe(ctx context.Context) error {
 		p.tools = append(p.tools, &Tool{p: p, spec: spec})
 	}
 	for _, c := range r.Commands {
-		p.commands = append(p.commands, &Command{p: p, name: c.Name, desc: c.Description})
+		p.commands = append(p.commands, &Command{p: p, name: c.Name, prefix: c.Prefix, desc: c.Description})
 	}
 	for _, h := range r.Hooks {
 		p.hooks[h] = true
@@ -278,12 +278,14 @@ func (t *Tool) Run(ctx context.Context, args json.RawMessage) (string, error) {
 
 // Command is a guest-provided slash command, e.g. "/model gpt-5".
 type Command struct {
-	p    *Plugin
-	name string
-	desc string
+	p      *Plugin
+	name   string
+	prefix string
+	desc   string
 }
 
 func (c *Command) Name() string        { return c.name }
+func (c *Command) Prefix() string      { return c.prefix }
 func (c *Command) Description() string { return c.desc }
 
 // Result is a command's reply: text to show, or choices to pick from.

@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -37,6 +38,9 @@ const (
 
 	cmdReload    = "reload"
 	noExtensions = "no extensions"
+
+	cmdShell    = "sh"
+	shellPrefix = "!"
 )
 
 // provider is an llm.Provider whose model can change at runtime.
@@ -182,14 +186,43 @@ func (s *session) prompt(ctx context.Context, text string) error {
 	return s.agent.Prompt(ctx, text)
 }
 
-// uiCommands is the extension commands plus the built-in /reload.
+// uiCommands is the extension commands plus the built-ins /reload and /sh.
+// Built-ins come last so they win name clashes.
 func (s *session) uiCommands() []ui.Command {
 	reload := ui.Command{
 		Name:        cmdReload,
 		Description: "Reload extensions from " + extDir,
 		Run:         s.reload,
 	}
-	return append(slices.Clone(s.commands), reload)
+	sh := ui.Command{
+		Name:        cmdShell,
+		Prefix:      shellPrefix,
+		Description: "Run a shell command; the model sees it",
+		Run:         s.shell,
+	}
+	return append(slices.Clone(s.commands), reload, sh)
+}
+
+// shell runs a user's shell command on the host, like the bash tool,
+// and notes command and output in the history for the model:
+//
+//	!ls  →  "User ran a shell command:\n$ ls\ngo.mod ..."
+func (s *session) shell(ctx context.Context, input string) (ui.Result, error) {
+	if input == "" {
+		return ui.Result{}, errors.New("usage: " + shellPrefix + "command")
+	}
+
+	args, err := json.Marshal(map[string]string{"command": input})
+	if err != nil {
+		return ui.Result{}, err
+	}
+	out, err := tools.Bash{}.Run(ctx, args)
+	if err != nil {
+		return ui.Result{}, err
+	}
+
+	s.agent.Note("User ran a shell command:\n$ " + input + "\n" + out)
+	return ui.Result{Output: out}, nil
 }
 
 // reload restarts every extension from extDir and swaps the agent's tools,
@@ -221,6 +254,7 @@ func (s *session) reload(ctx context.Context, _ string) (ui.Result, error) {
 func uiCommand(c *ext.Command) ui.Command {
 	return ui.Command{
 		Name:        c.Name(),
+		Prefix:      c.Prefix(),
 		Description: c.Description(),
 		Run: func(ctx context.Context, input string) (ui.Result, error) {
 			r, err := c.Run(ctx, input)

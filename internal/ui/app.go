@@ -337,6 +337,9 @@ func (m *model) submit() tea.Cmd {
 	}
 	m.input.Reset()
 
+	if name, input, ok := parsePrefix(m.cmds, text); ok {
+		return tea.Batch(m.print(m.r.user(text)), m.command(name, input))
+	}
 	if name, input, ok := parseSlash(text); ok {
 		return tea.Batch(m.print(m.r.user(text)), m.command(name, input))
 	}
@@ -485,8 +488,14 @@ func (m *model) View() tea.View {
 }
 
 // colorCommand paints a typed "/command" token: accent when it names or
-// uniquely prefixes a command, error color otherwise.
+// uniquely prefixes a command, error color otherwise. A command prefix
+// such as "!" is painted in accent.
 func (m *model) colorCommand(view string) string {
+	if name, _, ok := parsePrefix(m.cmds, m.input.Value()); ok {
+		p := m.cmds[name].Prefix
+		return strings.Replace(view, p, m.r.pal.user.Render(p), 1)
+	}
+
 	token, ok := typedCommand(m.input.Value())
 	if !ok || token == slash {
 		return view

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -29,5 +30,40 @@ func TestCommandSpinner(t *testing.T) {
 	view = ansi.Strip(m.View().Content)
 	if strings.Contains(view, "running /model") || m.pick == nil {
 		t.Errorf("spinner left or no picker:\n%s", view)
+	}
+}
+
+// A command's prefix runs it: "!ls -a" runs "sh" with "ls -a".
+func TestCommandPrefix(t *testing.T) {
+	var got string
+	cmds := []Command{{Name: "sh", Prefix: "!", Run: func(_ context.Context, in string) (Result, error) {
+		got = in
+		return Result{}, nil
+	}}}
+	m := newModel(func() string { return "m" }, true, nil, cmds)
+
+	m.input.SetValue("!ls -a")
+	cmd := m.submit()
+	if cmd == nil || m.running {
+		t.Fatal("prefix did not start a command")
+	}
+	runAll(cmd)
+
+	if got != "ls -a" {
+		t.Errorf("input = %q", got)
+	}
+}
+
+// runAll runs cmd and, recursively, the commands of a batch it returns.
+func runAll(cmd tea.Cmd) {
+	if cmd == nil {
+		return
+	}
+	batch, ok := cmd().(tea.BatchMsg)
+	if !ok {
+		return
+	}
+	for _, c := range batch {
+		runAll(c)
 	}
 }

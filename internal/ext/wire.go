@@ -58,6 +58,7 @@ type wireTool struct {
 
 type wireCommand struct {
 	Name        string `json:"name"`
+	Prefix      string `json:"prefix,omitempty"`
 	Description string `json:"description"`
 }
 

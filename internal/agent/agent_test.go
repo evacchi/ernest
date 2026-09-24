@@ -116,3 +116,18 @@ func TestSetTools(t *testing.T) {
 		t.Errorf("tool result = %q", got)
 	}
 }
+
+// Note adds a user message without a model turn.
+func TestNote(t *testing.T) {
+	p := &scripted{}
+	a := New(p, "", nil, nil, nil)
+	a.Note("$ ls")
+
+	h := a.History()
+	if len(h) != 1 || h[0].Role != llm.RoleUser || h[0].Content != "$ ls" {
+		t.Errorf("history = %+v", h)
+	}
+	if len(p.reqs) != 0 {
+		t.Errorf("model called")
+	}
+}

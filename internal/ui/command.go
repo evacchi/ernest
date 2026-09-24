@@ -13,8 +13,10 @@ const (
 )
 
 // Command is a slash command typed in the input, e.g. "/model gpt-5".
+// A Prefix, if set, is a shorthand: "!ls" runs "/sh ls".
 type Command struct {
 	Name        string
+	Prefix      string
 	Description string
 	Run         func(ctx context.Context, input string) (Result, error)
 }
@@ -107,12 +109,31 @@ func parseSlash(text string) (name, input string, ok bool) {
 	return name, strings.TrimSpace(input), true
 }
 
+// parsePrefix splits "!ls -a" into ("sh", "ls -a") when a command
+// declares prefix "!". "/" is reserved for slash commands.
+func parsePrefix(cmds map[string]Command, text string) (name, input string, ok bool) {
+	for _, n := range sortedNames(cmds) {
+		p := cmds[n].Prefix
+		if p == "" || p == slash {
+			continue
+		}
+		if rest, ok := strings.CutPrefix(text, p); ok {
+			return n, strings.TrimSpace(rest), true
+		}
+	}
+	return "", "", false
+}
+
 // help lists commands, e.g. "/model  Show or switch the model".
 func (r *renderer) help(cmds map[string]Command) string {
 	names := sortedNames(cmds)
 	lines := []string{fmt.Sprintf("%-10s %s", slash+cmdHelp, r.pal.dim.Render("List commands"))}
 	for _, n := range names {
-		lines = append(lines, fmt.Sprintf("%-10s %s", slash+n, r.pal.dim.Render(cmds[n].Description)))
+		desc := cmds[n].Description
+		if p := cmds[n].Prefix; p != "" {
+			desc += " (" + p + ")"
+		}
+		lines = append(lines, fmt.Sprintf("%-10s %s", slash+n, r.pal.dim.Render(desc)))
 	}
 	return strings.Join(lines, "\n")
 }
