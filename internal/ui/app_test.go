@@ -7,6 +7,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/evacchi/ernest/internal/llm"
 )
 
 // A running command shows a spinner line until its result arrives.
@@ -51,6 +53,44 @@ func TestCommandPrefix(t *testing.T) {
 
 	if got != "ls -a" {
 		t.Errorf("input = %q", got)
+	}
+}
+
+// A start text runs on Init, as if typed: "ernest resume" runs "/resume".
+func TestStartCommand(t *testing.T) {
+	ran := false
+	cmds := []Command{{Name: "resume", Run: func(context.Context, string) (Result, error) {
+		ran = true
+		return Result{}, nil
+	}}}
+	m := newModel(func() string { return "m" }, true, nil, cmds)
+	m.start = "/resume"
+
+	runAll(m.Init())
+	if !ran || m.busy != "resume" {
+		t.Errorf("ran = %v, busy = %q", ran, m.busy)
+	}
+}
+
+// A resumed conversation prints prompts, tool results and answers.
+func TestTranscript(t *testing.T) {
+	r := newRenderer(true)
+	blocks := r.transcript([]llm.Message{
+		{Role: llm.RoleSystem, Content: "sys"},
+		{Role: llm.RoleUser, Content: "list files"},
+		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "1", Name: "bash", Args: `{"command":"ls"}`}}},
+		{Role: llm.RoleTool, ToolCallID: "1", Content: "go.mod"},
+		{Role: llm.RoleAssistant, Content: "one file"},
+	})
+
+	got := ansi.Strip(strings.Join(blocks, "\n"))
+	if len(blocks) != 3 || strings.Contains(got, "sys") {
+		t.Fatalf("blocks:\n%s", got)
+	}
+	for _, want := range []string{"list files", "ls", "go.mod", "one file"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
 	}
 }
 

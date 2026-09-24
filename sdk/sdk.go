@@ -13,6 +13,8 @@
 // The guest also sees /work (the workspace, copy-on-write), read-only
 // /agent/history and /agent/config/model, which switches the model when
 // written, and /agent/config/models, one available model per line.
+// /agent/sessions lists saved sessions; writing an id to
+// /agent/config/session resumes it.
 package sdk
 
 import (

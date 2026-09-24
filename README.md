@@ -23,7 +23,13 @@ OpenAI models, four built-in tools, wasm extensions.
 export OPENAI_API_KEY=...
 go run ./cmd/ernest                 # REPL
 go run ./cmd/ernest -p "list files" # one-shot
+go run ./cmd/ernest resume          # REPL, running /resume first
 ```
+
+`ernest cmd args` starts the REPL with `/cmd args`, for any command.
+
+Sessions are saved to `.ernest/sessions/<id>.jsonl`, one message per
+line, as they happen.
 
 Interactive mode is a [bubbletea](https://charm.land) UI: markdown via
 glamour, code and diffs highlighted with chroma. `edit`/`write` return
@@ -47,6 +53,7 @@ restarts them all from that directory (not while a prompt is running).
 GOOS=wasip1 GOARCH=wasm go build -o .ernest/extensions/reverse.wasm ./examples/reverse
 GOOS=wasip1 GOARCH=wasm go build -o .ernest/extensions/model.wasm ./examples/model
 GOOS=wasip1 GOARCH=wasm go build -o .ernest/extensions/hello.wasm ./examples/hello
+GOOS=wasip1 GOARCH=wasm go build -o .ernest/extensions/resume.wasm ./examples/resume
 ```
 
 - `examples/reverse`: a tool plus a hook blocking `rm -rf`.
@@ -56,6 +63,9 @@ GOOS=wasip1 GOARCH=wasm go build -o .ernest/extensions/hello.wasm ./examples/hel
   shown as a picker.
 - `examples/hello`: the `/hello [name]` slash command, which replies with a
   greeting.
+- `examples/resume`: the `/resume [id]` slash command. Without an id it
+  offers `/agent/sessions` as choices; the pick is written to
+  `/agent/config/session`, and the host loads and reprints it.
 
 An extension is a long-lived WASI command. It talks to the host only through
 files; there are no custom imports or exports. The guest file system is a
@@ -68,6 +78,8 @@ files; there are no custom imports or exports. The guest file system is a
 /agent/history       conversation so far, JSON
 /agent/config/model  current model; writing it switches the model
 /agent/config/models available models, one per line (GET /v1/models)
+/agent/sessions      saved sessions, newest first: "<id> <first prompt>"
+/agent/config/session current session id; writing an id resumes it
 ```
 
 ### Protocol

@@ -22,6 +22,8 @@ const (
 	fileModel  = "model"
 	fileModels = "models"
 	fileHist   = "history"
+	fileSess   = "sessions"
+	fileID     = "session"
 	readOnly   = 0o444
 	readWrite  = 0o644
 	blockingIO = true
@@ -36,6 +38,8 @@ const (
 //	/agent/history       conversation so far, JSON
 //	/agent/config/model  current model; writing it switches the model
 //	/agent/config/models available models, one per line
+//	/agent/sessions      saved sessions, one per line: "<id> <title>"
+//	/agent/config/session current session id; writing an id resumes it
 func namespace(workdir string, s Session, rpc *pipe.PortFile) (fs.FS, error) {
 	base, err := localfs.New(workdir)
 	if err != nil {
@@ -47,9 +51,11 @@ func namespace(workdir string, s Session, rpc *pipe.PortFile) (fs.FS, error) {
 		dirAgent: fskit.MapFS{
 			fileRPC:  fskit.OpenFunc(func(context.Context, string) (fs.File, error) { return rpc, nil }),
 			fileHist: computed(fileHist, func() ([]byte, error) { return json.Marshal(s.History()) }),
+			fileSess: computed(fileSess, func() ([]byte, error) { return lines(ignoreCtx(s.Sessions)) }),
 			dirConfig: fskit.MapFS{
 				fileModel:  setting(fileModel, s.Model, s.SetModel),
 				fileModels: computed(fileModels, func() ([]byte, error) { return lines(s.Models) }),
+				fileID:     setting(fileID, s.ID, s.Resume),
 			},
 		},
 	}, nil
@@ -65,6 +71,11 @@ func lines(list func(context.Context) ([]string, error)) ([]byte, error) {
 		return nil, err
 	}
 	return []byte(strings.Join(items, "\n") + "\n"), nil
+}
+
+// ignoreCtx adapts a local listing to lines.
+func ignoreCtx(list func() ([]string, error)) func(context.Context) ([]string, error) {
+	return func(context.Context) ([]string, error) { return list() }
 }
 
 // computed is a read-only file whose content fn produces on every read.

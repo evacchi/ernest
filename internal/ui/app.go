@@ -78,6 +78,13 @@ func (a *App) SetCommands(cmds []Command) {
 	}
 }
 
+// Replay prints a resumed conversation into the scrollback.
+func (a *App) Replay(msgs []llm.Message) {
+	if p := a.prog.Load(); p != nil {
+		p.Send(replayMsg(msgs))
+	}
+}
+
 // Log returns a writer for complete lines (e.g. extension output). Lines are
 // printed above the UI while it runs, to stderr otherwise.
 func (a *App) Log() io.Writer {
@@ -96,9 +103,11 @@ func (w logWriter) Write(b []byte) (int, error) {
 }
 
 // Run shows the splash banner, then the UI until the user quits.
-func (a *App) Run(prompt PromptFunc, cmds []Command, info Info) error {
+// A non-empty start is submitted first, as if typed, e.g. "/resume".
+func (a *App) Run(prompt PromptFunc, cmds []Command, info Info, start string) error {
 	dark := lipgloss.HasDarkBackground(os.Stdin, os.Stdout)
 	m := newModel(a.model, dark, prompt, cmds)
+	m.start = start
 
 	// The banner prints before bubbletea reports the size; ask directly.
 	if w, _, err := term.GetSize(os.Stdout.Fd()); err == nil {
@@ -126,6 +135,7 @@ type (
 	}
 	flushedMsg  struct{}
 	commandsMsg []Command
+	replayMsg   []llm.Message
 )
 
 type model struct {
@@ -142,6 +152,7 @@ type model struct {
 	pick    *picker // non-nil while choosing a command argument
 	busy    string  // command in flight, e.g. "model"
 	splash  string  // printed once on start
+	start   string  // submitted once on start
 
 	stream strings.Builder // in-flight assistant markdown
 	live   string          // rendered stream
@@ -204,7 +215,12 @@ func inputStyles(pal palette, dark bool) textarea.Styles {
 }
 
 func (m *model) Init() tea.Cmd {
-	return tea.Batch(m.input.Focus(), m.print(m.splash))
+	cmds := []tea.Cmd{m.input.Focus(), m.print(m.splash)}
+	if m.start != "" {
+		m.input.SetValue(m.start)
+		cmds = append(cmds, m.submit())
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -240,6 +256,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case commandsMsg:
 		m.cmds = byName(msg)
 		return m, nil
+
+	case replayMsg:
+		var cmds []tea.Cmd
+		for _, block := range m.r.transcript(msg) {
+			cmds = append(cmds, m.print(block))
+		}
+		return m, tea.Batch(cmds...)
 
 	case logMsg:
 		return m, m.print(m.r.pal.dim.Render(string(msg)))

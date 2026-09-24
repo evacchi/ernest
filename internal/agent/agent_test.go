@@ -131,3 +131,28 @@ func TestNote(t *testing.T) {
 		t.Errorf("model called")
 	}
 }
+
+func TestRecordRestore(t *testing.T) {
+	p := &scripted{replies: []llm.Message{{Role: llm.RoleAssistant, Content: "hi"}}}
+	a := New(p, "sys", nil, nil, nil)
+
+	var saved []llm.Message
+	a.Record(func(m llm.Message) { saved = append(saved, m) })
+	if err := a.Prompt(context.Background(), "hello"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The system prompt is not recorded: it is rebuilt on start.
+	if len(saved) != 2 || saved[0].Content != "hello" || saved[1].Content != "hi" {
+		t.Fatalf("saved = %+v", saved)
+	}
+
+	b := New(p, "sys2", nil, nil, nil)
+	b.Note("stale")
+	b.Restore(saved)
+
+	h := b.History()
+	if len(h) != 3 || h[0].Content != "sys2" || h[1].Content != "hello" || h[2].Content != "hi" {
+		t.Errorf("history = %+v", h)
+	}
+}

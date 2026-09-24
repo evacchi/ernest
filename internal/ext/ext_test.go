@@ -26,7 +26,7 @@ func build(t *testing.T, pkg string) string {
 }
 
 // fakeSession is an in-memory Session backing store.
-type fakeSession struct{ model string }
+type fakeSession struct{ model, id string }
 
 func (f *fakeSession) session() Session {
 	return Session{
@@ -36,6 +36,11 @@ func (f *fakeSession) session() Session {
 			return []string{"gpt-6-luna", "gpt-5", "whisper-1", "gpt-4o-2024-08-06", "o3", "gpt-4o-realtime-preview"}, nil
 		},
 		History: func() []llm.Message { return nil },
+		ID:      func() string { return f.id },
+		Resume:  func(id string) error { f.id = id; return nil },
+		Sessions: func() ([]string, error) {
+			return []string{"20260924-103000 fix the bug", "20260923-090000 hello"}, nil
+		},
 	}
 }
 
@@ -147,6 +152,28 @@ func TestModelCommand(t *testing.T) {
 	res, err = cmd.Run(ctx, "gpt-6-luna")
 	if err != nil || fs.model != "gpt-6-luna" || !strings.Contains(res.Output, "gpt-6-luna") {
 		t.Errorf("set = %+v, %v, model %q", res, err, fs.model)
+	}
+}
+
+// The /resume demo: lists /agent/sessions, resumes via /agent/config/session.
+func TestResumeCommand(t *testing.T) {
+	ctx := context.Background()
+	fs := &fakeSession{model: "m1"}
+	p := loadWith(t, "../../examples/resume", t.TempDir(), fs)
+	cmd := p.Commands()[0]
+
+	res, err := cmd.Run(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Choices) != 2 || res.Choices[0] != "20260924-103000 fix the bug" {
+		t.Fatalf("choices = %q", res.Choices)
+	}
+
+	// A pick is the whole line; the id is its first field.
+	res, err = cmd.Run(ctx, res.Choices[0])
+	if err != nil || fs.id != "20260924-103000" || res.Output != "resumed 20260924-103000" {
+		t.Errorf("resume = %+v, %v, id %q", res, err, fs.id)
 	}
 }
 

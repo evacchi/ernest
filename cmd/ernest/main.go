@@ -2,6 +2,7 @@
 //
 //	ernest              interactive UI
 //	ernest -p "prompt"  one prompt, then exit
+//	ernest cmd [args]   interactive UI, running /cmd args first
 package main
 
 import (
@@ -19,6 +20,7 @@ import (
 
 	"github.com/evacchi/ernest/internal/agent"
 	"github.com/evacchi/ernest/internal/ext"
+	"github.com/evacchi/ernest/internal/history"
 	"github.com/evacchi/ernest/internal/llm"
 	"github.com/evacchi/ernest/internal/llm/openai"
 	"github.com/evacchi/ernest/internal/tools"
@@ -32,6 +34,7 @@ const (
 
 	defaultModel = "gpt-6-luna"
 	extDir       = ".ernest/extensions"
+	sessionDir   = ".ernest/sessions"
 
 	apiResponses = "responses"
 	apiChat      = "chat"
@@ -41,6 +44,12 @@ const (
 
 	cmdShell    = "sh"
 	shellPrefix = "!"
+	slash       = "/"
+)
+
+var (
+	errBusy        = errors.New("a prompt is running")
+	errArgsOneShot = errors.New("commands need the interactive UI; drop -p")
 )
 
 // provider is an llm.Provider whose model can change at runtime.
@@ -68,6 +77,12 @@ func run() error {
 	api := flag.String("api", apiResponses, "OpenAI API: responses or chat")
 	flag.Parse()
 
+	// "ernest resume" starts the UI with "/resume".
+	start := ""
+	if flag.NArg() > 0 {
+		start = slash + strings.Join(flag.Args(), " ")
+	}
+
 	key := os.Getenv(envAPIKey)
 	if key == "" {
 		return fmt.Errorf("%s not set", envAPIKey)
@@ -85,6 +100,9 @@ func run() error {
 
 	// One-shot: plain rendering, Ctrl-C cancels the prompt.
 	if *oneShot != "" {
+		if start != "" {
+			return errArgsOneShot
+		}
 		s, err := assemble(p, wd, ui.NewPrinter().Emit, os.Stderr)
 		if err != nil {
 			return err
@@ -104,7 +122,8 @@ func run() error {
 	defer s.host.Close(context.Background())
 
 	s.onReload = app.SetCommands
-	return app.Run(s.prompt, s.uiCommands(), ui.Info{Workdir: wd, Extensions: s.extensions})
+	s.onResume = app.Replay
+	return app.Run(s.prompt, s.uiCommands(), ui.Info{Workdir: wd, Extensions: s.extensions}, start)
 }
 
 func newProvider(api string, cfg openai.Config) (provider, error) {
@@ -117,21 +136,30 @@ func newProvider(api string, cfg openai.Config) (provider, error) {
 	return nil, fmt.Errorf("unknown -api %q: want %s or %s", api, apiResponses, apiChat)
 }
 
-// session is an assembled agent with its extensions.
+// session is an assembled agent with its extensions, saved to store
+// under id as it goes.
 type session struct {
 	agent      *agent.Agent
 	host       *ext.Host
 	commands   []ui.Command
 	extensions []string
 
-	busy     atomic.Bool        // a prompt is running
-	onReload func([]ui.Command) // receives the new command list
+	store *history.Store
+	id    atomic.Pointer[string]
+
+	busy     atomic.Bool         // a prompt is running
+	onReload func([]ui.Command)  // receives the new command list
+	onResume func([]llm.Message) // receives a resumed conversation
 }
 
 // assemble wires provider, built-in tools and extensions into an agent,
 // and turns extension commands into UI slash commands. Extensions read
 // history lazily, after the agent exists.
 func assemble(p provider, wd string, emit func(agent.Event), log io.Writer) (*session, error) {
+	s := &session{store: history.NewStore(sessionDir)}
+	id := history.NewID()
+	s.id.Store(&id)
+
 	var current atomic.Pointer[agent.Agent]
 	state := ext.Session{
 		Model:    p.Model,
@@ -143,6 +171,9 @@ func assemble(p provider, wd string, emit func(agent.Event), log io.Writer) (*se
 			}
 			return nil
 		},
+		ID:       func() string { return *s.id.Load() },
+		Resume:   s.resume,
+		Sessions: s.sessions,
 	}
 
 	host := ext.NewHost(wd, state, log)
@@ -152,11 +183,50 @@ func assemble(p provider, wd string, emit func(agent.Event), log io.Writer) (*se
 		return nil, err
 	}
 
-	s := &session{host: host}
+	s.host = host
 	ts, hooks := s.use(plugins)
 	s.agent = agent.New(p, fmt.Sprintf(systemPrompt, wd), ts, hooks, emit)
+	s.agent.Record(func(m llm.Message) {
+		if err := s.store.Append(*s.id.Load(), m); err != nil {
+			fmt.Fprintln(log, "history:", err)
+		}
+	})
 	current.Store(s.agent)
 	return s, nil
+}
+
+// resume swaps the conversation for saved session id, which later
+// messages extend. Refused mid-prompt, like reload.
+func (s *session) resume(id string) error {
+	if s.busy.Load() {
+		return errBusy
+	}
+
+	msgs, err := s.store.Load(id)
+	if err != nil {
+		return err
+	}
+	s.agent.Restore(msgs)
+	s.id.Store(&id)
+
+	if s.onResume != nil {
+		s.onResume(msgs)
+	}
+	return nil
+}
+
+// sessions lists saved sessions for /agent/sessions: "<id> <title>".
+func (s *session) sessions() ([]string, error) {
+	infos, err := s.store.List()
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]string, 0, len(infos))
+	for _, in := range infos {
+		out = append(out, in.ID+" "+in.Title)
+	}
+	return out, nil
 }
 
 // use records plugins' commands and names and returns the agent's tools

@@ -1,2 +1,4 @@
 .idea
 .ernest/extensions/*.wasm
+.ernest/sessions/
+.specs

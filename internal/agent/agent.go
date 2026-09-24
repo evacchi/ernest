@@ -86,6 +86,7 @@ type Agent struct {
 	mu      sync.Mutex
 	history []llm.Message
 	ts      *toolset
+	record  func(llm.Message) // sees every appended message; may be nil
 }
 
 // toolset is the tools and hooks one model turn works with.
@@ -146,6 +147,29 @@ func (a *Agent) History() []llm.Message {
 	return slices.Clone(a.history)
 }
 
+// Record calls fn with every message added from now on, e.g. to save
+// the session. fn runs in order, under the history lock.
+func (a *Agent) Record(fn func(llm.Message)) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.record = fn
+}
+
+// Restore replaces the conversation with msgs, keeping the system prompt.
+// Restored messages are not recorded: they are already saved.
+func (a *Agent) Restore(msgs []llm.Message) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.history = slices.DeleteFunc(a.history, func(m llm.Message) bool { return m.Role != llm.RoleSystem })
+	for _, m := range msgs {
+		if m.Role == llm.RoleSystem {
+			continue
+		}
+		a.history = append(a.history, m)
+	}
+}
+
 // Prompt adds a user message and loops until the model stops calling tools.
 func (a *Agent) Prompt(ctx context.Context, text string) error {
 	a.append(llm.Message{Role: llm.RoleUser, Content: text})
@@ -191,6 +215,9 @@ func (a *Agent) append(m llm.Message) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.history = append(a.history, m)
+	if a.record != nil {
+		a.record(m)
+	}
 }
 
 // call runs one tool call through the hooks and returns the tool message.
