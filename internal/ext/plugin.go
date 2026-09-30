@@ -31,6 +31,7 @@ var errExited = errors.New("exited")
 // guest did not subscribe to are no-ops.
 type Plugin struct {
 	name string
+	ask  func(ctx context.Context, question string, choices []string) (string, error)
 	rt   wazero.Runtime
 	sys  *wasi.System
 	stop context.CancelFunc
@@ -65,6 +66,7 @@ func start(ctx context.Context, cache wazero.CompilationCache, name string, wasm
 
 	p := &Plugin{
 		name:    name,
+		ask:     s.Ask,
 		rt:      wazero.NewRuntimeWithConfig(runCtx, cfg),
 		sys:     wasi.NewSystem(root, wasi.WithArgs(name), wasi.WithStdio(nil, out, out)),
 		stop:    stop,
@@ -142,20 +144,17 @@ func (p *Plugin) readLoop() {
 	}
 }
 
-// do sends req and waits for the reply with the same id. Replies to
-// requests abandoned on ctx cancellation are skipped.
+// do sends req and waits for the reply with the same id, answering the
+// guest's questions on the way. Replies to requests abandoned on ctx
+// cancellation are skipped.
 func (p *Plugin) do(ctx context.Context, req request) (reply, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	p.nextID++
 	req.ID = p.nextID
-	line, err := json.Marshal(req)
-	if err != nil {
+	if err := p.send(req); err != nil {
 		return reply{}, err
-	}
-	if _, err := p.rpc.Write(append(line, '\n')); err != nil {
-		return reply{}, p.dead()
 	}
 
 	for {
@@ -167,6 +166,12 @@ func (p *Plugin) do(ctx context.Context, req request) (reply, error) {
 			if r.ID != req.ID {
 				continue
 			}
+			if r.Ask != nil {
+				if err := p.send(request{ID: req.ID, Op: opAnswer, Input: p.answer(ctx, *r.Ask)}); err != nil {
+					return reply{}, err
+				}
+				continue
+			}
 			if r.Error != "" {
 				return r, errors.New(r.Error)
 			}
@@ -176,6 +181,29 @@ func (p *Plugin) do(ctx context.Context, req request) (reply, error) {
 			return reply{}, ctx.Err()
 		}
 	}
+}
+
+func (p *Plugin) send(req request) error {
+	line, err := json.Marshal(req)
+	if err != nil {
+		return err
+	}
+	if _, err := p.rpc.Write(append(line, '\n')); err != nil {
+		return p.dead()
+	}
+	return nil
+}
+
+// answer asks the user. No one to ask reads as dismissed: "".
+func (p *Plugin) answer(ctx context.Context, a wireAsk) string {
+	if p.ask == nil {
+		return ""
+	}
+	ans, err := p.ask(ctx, a.Question, a.Choices)
+	if err != nil {
+		return ""
+	}
+	return ans
 }
 
 func (p *Plugin) dead() error {
@@ -220,20 +248,34 @@ func (p *Plugin) Tools() []*Tool { return p.tools }
 // Commands returns the slash commands the guest declared.
 func (p *Plugin) Commands() []*Command { return p.commands }
 
-// OnToolCall asks the guest whether call may run.
-func (p *Plugin) OnToolCall(ctx context.Context, call llm.ToolCall) (agent.Decision, error) {
+// OnToolCalls asks the guest to decide the batch, one Decision per call.
+func (p *Plugin) OnToolCalls(ctx context.Context, calls []llm.ToolCall) ([]agent.Decision, error) {
+	ds := make([]agent.Decision, len(calls))
 	if !p.hooks[eventToolCall] {
-		return agent.Decision{}, nil
+		return ds, nil
 	}
 
-	r, err := p.do(ctx, request{Op: opHook, Event: eventToolCall, Call: toWire(call)})
+	wire := make([]wireCall, len(calls))
+	for i, c := range calls {
+		wire[i] = *toWire(c)
+	}
+	r, err := p.do(ctx, request{Op: opHook, Event: eventToolCall, Calls: wire})
 	if err != nil {
-		return agent.Decision{}, err
+		return nil, err
 	}
-	if r.Block {
-		return agent.Decision{Verdict: agent.Block, Reason: r.Reason}, nil
+	if len(r.Decisions) != len(calls) {
+		return nil, fmt.Errorf("extension %s: %d decisions for %d calls", p.name, len(r.Decisions), len(calls))
 	}
-	return agent.Decision{}, nil
+
+	for i, d := range r.Decisions {
+		switch d.Verdict {
+		case verdictBlock:
+			ds[i] = agent.Decision{Verdict: agent.Block, Reason: d.Reason}
+		case verdictGrant:
+			ds[i] = agent.Decision{Verdict: agent.Grant}
+		}
+	}
+	return ds, nil
 }
 
 // OnToolResult lets the guest rewrite a tool result. No output in the reply

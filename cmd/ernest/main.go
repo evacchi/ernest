@@ -107,7 +107,7 @@ func run() error {
 		if start != "" {
 			return errArgsOneShot
 		}
-		s, err := assemble(p, wd, ui.NewPrinter().Emit, os.Stderr)
+		s, err := assemble(p, wd, ui.NewPrinter().Emit, nil, os.Stderr)
 		if err != nil {
 			return err
 		}
@@ -119,7 +119,7 @@ func run() error {
 	}
 
 	app := ui.NewApp(p.Model)
-	s, err := assemble(p, wd, app.Emit, app.Log())
+	s, err := assemble(p, wd, app.Emit, app.Ask, app.Log())
 	if err != nil {
 		return err
 	}
@@ -143,6 +143,9 @@ func newProvider(api string, cfg openai.Config) (provider, error) {
 
 // session is an assembled agent with its extensions, saved to store
 // under id as it goes.
+// askFunc asks the user; nil in one-shot mode, where no one can answer.
+type askFunc func(ctx context.Context, question string, choices []string) (string, error)
+
 type session struct {
 	agent      *agent.Agent
 	host       *ext.Host
@@ -162,7 +165,7 @@ type session struct {
 // assemble wires provider, built-in tools and extensions into an agent,
 // and turns extension commands into UI slash commands. Extensions read
 // history lazily, after the agent exists.
-func assemble(p provider, wd string, emit func(agent.Event), log io.Writer) (*session, error) {
+func assemble(p provider, wd string, emit func(agent.Event), ask askFunc, log io.Writer) (*session, error) {
 	// The model's bash writes only to wd and temp, never the network.
 	sb, err := tools.NewSandbox(wd, os.TempDir())
 	if err != nil {
@@ -187,6 +190,7 @@ func assemble(p provider, wd string, emit func(agent.Event), log io.Writer) (*se
 		ID:       func() string { return *s.id.Load() },
 		Resume:   s.resume,
 		Sessions: s.sessions,
+		Ask:      ask,
 	}
 
 	host := ext.NewHost(wd, state, log)

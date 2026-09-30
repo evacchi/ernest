@@ -41,6 +41,10 @@ type Session struct {
 	ID       func() string
 	Resume   func(string) error
 	Sessions func() ([]string, error)
+
+	// Ask shows the user question and returns the chosen answer, or ""
+	// if dismissed. It fails when no one can answer, e.g. one-shot runs.
+	Ask func(ctx context.Context, question string, choices []string) (string, error)
 }
 
 // Host loads extensions and owns their lifetimes.

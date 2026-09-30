@@ -145,3 +145,28 @@ func runAll(cmd tea.Cmd) {
 		runAll(c)
 	}
 }
+
+// An ask opens a picker titled with the question, even mid-prompt; the
+// pick answers it, and the prompt ending dismisses an unanswered one.
+func TestAsk(t *testing.T) {
+	m := newModel(func() string { return "m" }, true, nil, nil)
+	m.running = true
+
+	answer := make(chan string, 1)
+	m.Update(askMsg{question: "Run it?", choices: []string{"yes", "no"}, answer: answer})
+	if view := ansi.Strip(m.View().Content); !strings.Contains(view, "Run it?") {
+		t.Errorf("no question:\n%s", view)
+	}
+
+	m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if got := <-answer; got != "no" || m.pick != nil {
+		t.Errorf("answer = %q, picker open = %v", got, m.pick != nil)
+	}
+
+	m.Update(askMsg{question: "Again?", choices: []string{"yes"}, answer: answer})
+	m.Update(doneMsg{})
+	if got := <-answer; got != "" || m.pick != nil {
+		t.Errorf("after done: answer = %q, picker open = %v", got, m.pick != nil)
+	}
+}

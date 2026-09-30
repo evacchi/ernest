@@ -3,9 +3,11 @@ package ext
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -25,8 +27,13 @@ func build(t *testing.T, pkg string) string {
 	return out
 }
 
+var errNoAsk = errors.New("no ask")
+
 // fakeSession is an in-memory Session backing store.
-type fakeSession struct{ model, id string }
+type fakeSession struct {
+	model, id string
+	ask       func(question string, choices []string) string
+}
 
 func (f *fakeSession) session() Session {
 	return Session{
@@ -38,6 +45,12 @@ func (f *fakeSession) session() Session {
 		History: func() []llm.Message { return nil },
 		ID:      func() string { return f.id },
 		Resume:  func(id string) error { f.id = id; return nil },
+		Ask: func(_ context.Context, q string, choices []string) (string, error) {
+			if f.ask == nil {
+				return "", errNoAsk
+			}
+			return f.ask(q, choices), nil
+		},
 		Sessions: func() ([]string, error) {
 			return []string{"20260924-103000 fix the bug", "20260923-090000 hello"}, nil
 		},
@@ -51,15 +64,25 @@ func load(t *testing.T, pkg, workdir string) *Plugin {
 
 func loadWith(t *testing.T, pkg, workdir string, fs *fakeSession) *Plugin {
 	t.Helper()
+	_, ps := loadAll(t, workdir, fs, pkg)
+	return ps[0]
+}
+
+func loadAll(t *testing.T, workdir string, fs *fakeSession, pkgs ...string) (*Host, []*Plugin) {
+	t.Helper()
 	ctx := context.Background()
 	h := NewHost(workdir, fs.session(), &bytes.Buffer{})
 	t.Cleanup(func() { h.Close(ctx) })
 
-	p, err := h.Load(ctx, build(t, pkg))
-	if err != nil {
-		t.Fatal(err)
+	var ps []*Plugin
+	for _, pkg := range pkgs {
+		p, err := h.Load(ctx, build(t, pkg))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ps = append(ps, p)
 	}
-	return p
+	return h, ps
 }
 
 func TestReverse(t *testing.T) {
@@ -75,13 +98,15 @@ func TestReverse(t *testing.T) {
 		t.Errorf("reverse = %q, %v", out, err)
 	}
 
-	d, err := p.OnToolCall(ctx, llm.ToolCall{Name: "bash", Args: `{"command":"rm -rf /"}`})
-	if err != nil || d.Verdict != agent.Block {
-		t.Errorf("decision = %+v, %v", d, err)
+	rm := llm.ToolCall{ID: "1", Name: "bash", Args: `{"command":"rm -rf /"}`}
+	ls := llm.ToolCall{ID: "2", Name: "bash", Args: `{"command":"ls"}`}
+	ds, err := p.OnToolCalls(ctx, []llm.ToolCall{rm, ls})
+	if err != nil || ds[0].Verdict != agent.Block || ds[1].Verdict != agent.Allow {
+		t.Errorf("decisions = %+v, %v", ds, err)
 	}
 
 	// Not subscribed: passes through without a round trip.
-	out, err = p.OnToolResult(ctx, llm.ToolCall{}, "x")
+	out, err = p.OnToolResult(ctx, ls, "x")
 	if err != nil || out != "x" {
 		t.Errorf("result hook = %q, %v", out, err)
 	}
@@ -231,4 +256,54 @@ func TestDiskCache(t *testing.T) {
 	if err != nil || len(entries) == 0 {
 		t.Errorf("cache dir empty: %v, %v", entries, err)
 	}
+}
+
+// approve asks once per escalated command; "allow for session" skips
+// later asks, "deny" blocks, plain calls pass without asking.
+func TestApprove(t *testing.T) {
+	ctx := context.Background()
+	answers := []string{"allow for session", "deny"}
+	var asked []string
+	fs := &fakeSession{model: "m1", ask: func(q string, choices []string) string {
+		asked = append(asked, q)
+		a := answers[0]
+		answers = answers[1:]
+		return a
+	}}
+	p := loadWith(t, "../../examples/approve", t.TempDir(), fs)
+
+	batch := []llm.ToolCall{
+		{ID: "1", Name: "bash", Args: `{"command":"go get x","escalate":true}`},
+		{ID: "2", Name: "bash", Args: `{"command":"go get x","escalate":true}`},
+		{ID: "3", Name: "bash", Args: `{"command":"go get y","escalate":true}`},
+		{ID: "4", Name: "bash", Args: `{"command":"go get y"}`},
+	}
+	ds, err := p.OnToolCalls(ctx, batch)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := []agent.Verdict{agent.Grant, agent.Grant, agent.Block, agent.Allow}
+	for i, d := range ds {
+		if d.Verdict != want[i] {
+			t.Errorf("call %s: verdict = %v, want %v", batch[i].ID, d.Verdict, want[i])
+		}
+	}
+	if len(asked) != 2 || !strings.Contains(asked[0], "go get x") {
+		t.Errorf("asked = %q", asked)
+	}
+
+	res, err := command(p, "revoke").Run(ctx, "")
+	if err != nil || !slices.Equal(res.Choices, []string{"go get x"}) {
+		t.Errorf("revoke choices = %+v, %v", res, err)
+	}
+}
+
+func command(p *Plugin, name string) *Command {
+	for _, c := range p.Commands() {
+		if c.Name() == name {
+			return c
+		}
+	}
+	return nil
 }

@@ -84,6 +84,24 @@ func (a *App) SetCommands(cmds []Command) {
 	}
 }
 
+// Ask shows question as a picker of choices, even mid-prompt, and waits
+// for the pick. Dismissing it, or the prompt ending, answers "".
+func (a *App) Ask(ctx context.Context, question string, choices []string) (string, error) {
+	p := a.prog.Load()
+	if p == nil {
+		return "", errNoUI
+	}
+
+	answer := make(chan string, 1)
+	p.Send(askMsg{question: question, choices: choices, answer: answer})
+	select {
+	case s := <-answer:
+		return s, nil
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+
 // Replay prints a resumed conversation into the scrollback.
 func (a *App) Replay(msgs []llm.Message) {
 	if p := a.prog.Load(); p != nil {
@@ -143,7 +161,14 @@ type (
 	flushedMsg  struct{}
 	commandsMsg []Command
 	replayMsg   []llm.Message
+	askMsg      struct {
+		question string
+		choices  []string
+		answer   chan<- string // buffered: sends never block
+	}
 )
+
+var errNoUI = errors.New("ui not running")
 
 type model struct {
 	r      *renderer
@@ -267,6 +292,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cmds = byName(msg)
 		return m, nil
 
+	case askMsg:
+		m.dismissAsk()
+		m.pick = newAsk(msg.question, msg.choices, msg.answer)
+		return m, nil
+
 	case replayMsg:
 		var cmds []tea.Cmd
 		for _, block := range m.r.transcript(msg) {
@@ -333,8 +363,13 @@ func (m *model) onKey(k tea.KeyPressMsg) (tea.Cmd, bool) {
 	return nil, false
 }
 
-// onPickKey drives the picker; a pick re-runs its command with it.
+// onPickKey drives the picker; a pick re-runs its command with it, or
+// answers its question.
 func (m *model) onPickKey(k tea.KeyPressMsg) tea.Cmd {
+	if m.pick.answer != nil {
+		return m.onAskKey(k)
+	}
+
 	switch m.pick.key(k) {
 	case pickCancel:
 		m.pick = nil
@@ -345,6 +380,32 @@ func (m *model) onPickKey(k tea.KeyPressMsg) tea.Cmd {
 		return tea.Batch(m.print(m.r.user(slash+name+" "+choice)), m.command(name, choice))
 	}
 	return nil
+}
+
+// onAskKey answers the question with the pick, or "" if dismissed, and
+// leaves both in the scrollback.
+func (m *model) onAskKey(k tea.KeyPressMsg) tea.Cmd {
+	choice := ""
+	switch m.pick.key(k) {
+	case pickNone:
+		return nil
+	case pickDone:
+		choice, _ = m.pick.choice()
+	}
+
+	q := m.pick.question
+	m.pick.answer <- choice
+	m.pick = nil
+	return m.print(m.r.pal.dim.Render(q+" ") + m.r.pal.user.Render(choice))
+}
+
+// dismissAsk answers "" to an open question, if any.
+func (m *model) dismissAsk() {
+	if m.pick == nil || m.pick.answer == nil {
+		return
+	}
+	m.pick.answer <- ""
+	m.pick = nil
 }
 
 // complete replaces a partial "/mo" with the first matching command.
@@ -440,6 +501,7 @@ func (m *model) onEvent(e agent.Event) tea.Cmd {
 
 func (m *model) onDone(err error) tea.Cmd {
 	m.running, m.cancel, m.pending = false, nil, nil
+	m.dismissAsk()
 	cmd := m.commitStream()
 
 	switch {

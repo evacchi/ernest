@@ -2,8 +2,9 @@
 //
 //	user ─► Stream ─► assistant msg ─► no tool calls? done
 //	                     │
-//	                     └─► per call: OnToolCall ─► blocked? result = reason
-//	                                    └─► Run ─► OnToolResult ─► tool msg ─► Stream ...
+//	                     └─► whole batch: OnToolCalls
+//	                           └─► per call: blocked? result = reason
+//	                                └─► Run ─► OnToolResult ─► tool msg ─► Stream ...
 package agent
 
 import (
@@ -23,7 +24,10 @@ const (
 	errorPrefix = "error: "
 )
 
-var errTooManyTurns = fmt.Errorf("agent: exceeded %d turns", maxTurns)
+var (
+	errTooManyTurns = fmt.Errorf("agent: exceeded %d turns", maxTurns)
+	errDecisions    = errors.New("hook returned wrong number of decisions")
+)
 
 // Tool is something the model can call.
 type Tool interface {
@@ -31,12 +35,14 @@ type Tool interface {
 	Run(ctx context.Context, args json.RawMessage) (string, error)
 }
 
-// Verdict is a hook decision on a pending tool call.
+// Verdict is a hook decision on a pending tool call. Across hooks,
+// Block wins over Grant, and Grant over Allow.
 type Verdict int
 
 const (
-	Allow Verdict = iota
-	Block
+	Allow Verdict = iota // no objection
+	Block                // do not run
+	Grant                // run, and allow escalation; see Granted
 )
 
 // Decision is a Verdict plus the reason shown to the model when blocking.
@@ -45,9 +51,10 @@ type Decision struct {
 	Reason  string
 }
 
-// Hook observes and may alter tool execution.
+// Hook observes and may alter tool execution. OnToolCalls sees a model
+// turn's whole batch and returns one Decision per call.
 type Hook interface {
-	OnToolCall(ctx context.Context, call llm.ToolCall) (Decision, error)
+	OnToolCalls(ctx context.Context, calls []llm.ToolCall) ([]Decision, error)
 	OnToolResult(ctx context.Context, call llm.ToolCall, out string) (string, error)
 }
 
@@ -226,8 +233,9 @@ func (a *Agent) Prompt(ctx context.Context, text string) error {
 
 		// Every call gets an answer, even after cancellation, so the
 		// history stays valid for the next prompt.
-		for _, call := range msg.ToolCalls {
-			a.append(a.call(ctx, ts, call))
+		ds, err := ts.decide(ctx, msg.ToolCalls)
+		for i, call := range msg.ToolCalls {
+			a.append(a.call(ctx, ts, call, ds[i], err))
 		}
 
 		if err := ctx.Err(); err != nil {
@@ -257,10 +265,10 @@ func (a *Agent) append(m llm.Message) {
 }
 
 // call runs one tool call through the hooks and returns the tool message.
-func (a *Agent) call(ctx context.Context, ts *toolset, call llm.ToolCall) llm.Message {
+func (a *Agent) call(ctx context.Context, ts *toolset, call llm.ToolCall, d Decision, hookErr error) llm.Message {
 	a.emit(Event{Kind: EventToolCall, Call: call})
 
-	out, outcome := ts.exec(ctx, call)
+	out, outcome := ts.exec(ctx, call, d, hookErr)
 	if out == "" {
 		out = noOutput
 	}
@@ -269,21 +277,67 @@ func (a *Agent) call(ctx context.Context, ts *toolset, call llm.ToolCall) llm.Me
 	return llm.Message{Role: llm.RoleTool, ToolCallID: call.ID, Content: out}
 }
 
-// exec applies OnToolCall hooks, runs the tool, then OnToolResult hooks.
-// Hook failures fail closed: the model sees the error, not the output.
-func (ts *toolset) exec(ctx context.Context, call llm.ToolCall) (string, Outcome) {
+// decide merges every hook's decisions on the batch. The slice always
+// has one Decision per call; on error the caller fails them all.
+func (ts *toolset) decide(ctx context.Context, calls []llm.ToolCall) ([]Decision, error) {
+	merged := make([]Decision, len(calls))
 	if err := ctx.Err(); err != nil {
-		return failed(err)
+		return merged, err
 	}
 
 	for _, h := range ts.hooks {
-		d, err := h.OnToolCall(ctx, call)
+		ds, err := h.OnToolCalls(ctx, calls)
 		if err != nil {
-			return failed(fmt.Errorf("hook: %w", err))
+			return merged, err
 		}
-		if d.Verdict == Block {
-			return "blocked: " + d.Reason, OutcomeBlocked
+		if len(ds) != len(calls) {
+			return merged, errDecisions
 		}
+
+		for i, d := range ds {
+			merged[i] = combine(merged[i], d)
+		}
+	}
+	return merged, nil
+}
+
+// combine keeps the first Block, else any Grant.
+func combine(cur, next Decision) Decision {
+	if cur.Verdict == Block || next.Verdict == Allow {
+		return cur
+	}
+	return next
+}
+
+// grantKey marks a context whose tool call hooks granted.
+type grantKey struct{}
+
+// WithGrant marks ctx as granted.
+func WithGrant(ctx context.Context) context.Context {
+	return context.WithValue(ctx, grantKey{}, true)
+}
+
+// Granted reports whether hooks granted the running call, e.g. to let
+// bash leave its sandbox.
+func Granted(ctx context.Context) bool {
+	g, _ := ctx.Value(grantKey{}).(bool)
+	return g
+}
+
+// exec runs the tool as d allows, then OnToolResult hooks.
+// Hook failures fail closed: the model sees the error, not the output.
+func (ts *toolset) exec(ctx context.Context, call llm.ToolCall, d Decision, hookErr error) (string, Outcome) {
+	if err := ctx.Err(); err != nil {
+		return failed(err)
+	}
+	if hookErr != nil {
+		return failed(fmt.Errorf("hook: %w", hookErr))
+	}
+	if d.Verdict == Block {
+		return "blocked: " + d.Reason, OutcomeBlocked
+	}
+	if d.Verdict == Grant {
+		ctx = WithGrant(ctx)
 	}
 
 	out, err := ts.run(ctx, call)

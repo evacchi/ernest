@@ -26,11 +26,15 @@ const (
 
 // picker lets the user choose one of a command's choices; the pick
 // re-runs the command with it, e.g. "/model" → pick → "/model gpt-5".
+// With answer set, it asks question instead and sends the pick there.
 type picker struct {
 	command string
 	items   []string
 	filter  string
 	cursor  int
+
+	question string
+	answer   chan<- string
 }
 
 func newPicker(command string, items []string, selected string) *picker {
@@ -41,6 +45,10 @@ func newPicker(command string, items []string, selected string) *picker {
 		}
 	}
 	return p
+}
+
+func newAsk(question string, items []string, answer chan<- string) *picker {
+	return &picker{items: items, question: question, answer: answer}
 }
 
 // visible returns the items matching the filter, case-insensitively.
@@ -114,6 +122,9 @@ func (p *picker) move(d int) {
 // a frame shrinks.
 func (r *renderer) picker(p *picker) string {
 	head := r.pal.user.Render("/" + p.command)
+	if p.answer != nil {
+		head = r.pal.user.Render(p.question)
+	}
 	if p.filter != "" {
 		head += r.pal.dim.Render("  filter: ") + p.filter
 	}

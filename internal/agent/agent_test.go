@@ -34,15 +34,47 @@ func (echo) Run(_ context.Context, args json.RawMessage) (string, error) {
 // guard blocks calls whose args contain "rm" and uppercases results.
 type guard struct{}
 
-func (guard) OnToolCall(_ context.Context, c llm.ToolCall) (Decision, error) {
-	if strings.Contains(c.Args, "rm") {
-		return Decision{Verdict: Block, Reason: "no rm"}, nil
+func (guard) OnToolCalls(_ context.Context, calls []llm.ToolCall) ([]Decision, error) {
+	ds := make([]Decision, len(calls))
+	for i, c := range calls {
+		if strings.Contains(c.Args, "rm") {
+			ds[i] = Decision{Verdict: Block, Reason: "no rm"}
+		}
 	}
-	return Decision{}, nil
+	return ds, nil
 }
 
 func (guard) OnToolResult(_ context.Context, _ llm.ToolCall, out string) (string, error) {
 	return strings.ToUpper(out), nil
+}
+
+// granter grants every call whose args contain "sudo".
+type granter struct{}
+
+func (granter) OnToolCalls(_ context.Context, calls []llm.ToolCall) ([]Decision, error) {
+	ds := make([]Decision, len(calls))
+	for i, c := range calls {
+		if strings.Contains(c.Args, "sudo") {
+			ds[i] = Decision{Verdict: Grant}
+		}
+	}
+	return ds, nil
+}
+
+func (granter) OnToolResult(_ context.Context, _ llm.ToolCall, out string) (string, error) {
+	return out, nil
+}
+
+// whoami reports whether its call was granted.
+type whoami struct{}
+
+func (whoami) Spec() llm.ToolSpec { return llm.ToolSpec{Name: "whoami"} }
+
+func (whoami) Run(ctx context.Context, _ json.RawMessage) (string, error) {
+	if Granted(ctx) {
+		return "root", nil
+	}
+	return "user", nil
 }
 
 func toolTurn(calls ...llm.ToolCall) llm.Message {
@@ -94,6 +126,30 @@ func TestPrompt(t *testing.T) {
 
 	if len(p.reqs[1].Messages) != 6 {
 		t.Errorf("second request sent %d messages", len(p.reqs[1].Messages))
+	}
+}
+
+// Grant reaches the tool; Block from any hook wins over it.
+func TestGrant(t *testing.T) {
+	p := &scripted{replies: []llm.Message{
+		toolTurn(
+			llm.ToolCall{ID: "1", Name: "whoami", Args: `{}`},
+			llm.ToolCall{ID: "2", Name: "whoami", Args: `{"s":"sudo"}`},
+			llm.ToolCall{ID: "3", Name: "whoami", Args: `{"s":"sudo rm"}`},
+		),
+		{Role: llm.RoleAssistant, Content: "done"},
+	}}
+
+	a := New(p, "", []Tool{whoami{}}, []Hook{granter{}, guard{}}, nil)
+	if err := a.Prompt(context.Background(), "go"); err != nil {
+		t.Fatal(err)
+	}
+
+	want := map[string]string{"1": "USER", "2": "ROOT", "3": "blocked: no rm"}
+	for _, m := range a.History()[2:5] {
+		if m.Content != want[m.ToolCallID] {
+			t.Errorf("tool msg %s = %q, want %q", m.ToolCallID, m.Content, want[m.ToolCallID])
+		}
 	}
 }
 

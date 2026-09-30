@@ -33,6 +33,10 @@ const (
 	opCall     = "call"
 	opHook     = "hook"
 	opCommand  = "command"
+	opAnswer   = "answer"
+
+	verdictBlock = "block"
+	verdictGrant = "grant"
 
 	eventToolCall   = "tool_call"
 	eventToolResult = "tool_result"
@@ -64,12 +68,14 @@ type Call struct {
 	Args string `json:"args"`
 }
 
-// Verdict is a tool_call hook decision.
+// Verdict is a tool_call hook decision. Across extensions, Block wins
+// over Grant, and Grant over Allow.
 type Verdict int
 
 const (
-	Allow Verdict = iota
-	Block
+	Allow Verdict = iota // no objection
+	Block                // do not run
+	Grant                // run, even escalated (e.g. bash outside its sandbox)
 )
 
 // Decision is a Verdict plus the reason shown to the model when blocking.
@@ -115,7 +121,7 @@ func PrefixCommand(prefix, name, description string, fn CommandFunc) {
 	commands = append(commands, command{Name: name, Prefix: prefix, Description: description, fn: fn})
 }
 
-// OnToolCall registers a hook run before every tool call.
+// OnToolCall registers a hook run before every tool call. fn may Ask.
 func OnToolCall(fn func(Call) Decision) { onCall = fn }
 
 // OnToolResult registers a hook that may rewrite every tool result.
@@ -128,21 +134,62 @@ type request struct {
 	Args   json.RawMessage `json:"args"`
 	Event  string          `json:"event"`
 	Call   Call            `json:"call"`
+	Calls  []Call          `json:"calls"`
 	Output string          `json:"output"`
 	Input  string          `json:"input"`
 }
 
 type reply struct {
-	ID       int       `json:"id"`
-	Error    string    `json:"error,omitempty"`
-	Tools    []tool    `json:"tools,omitempty"`
-	Hooks    []string  `json:"hooks,omitempty"`
-	Commands []command `json:"commands,omitempty"`
-	Choices  []string  `json:"choices,omitempty"`
-	Selected string    `json:"selected,omitempty"`
-	Output   *string   `json:"output,omitempty"`
-	Block    bool      `json:"block,omitempty"`
-	Reason   string    `json:"reason,omitempty"`
+	ID        int        `json:"id"`
+	Error     string     `json:"error,omitempty"`
+	Tools     []tool     `json:"tools,omitempty"`
+	Hooks     []string   `json:"hooks,omitempty"`
+	Commands  []command  `json:"commands,omitempty"`
+	Choices   []string   `json:"choices,omitempty"`
+	Selected  string     `json:"selected,omitempty"`
+	Output    *string    `json:"output,omitempty"`
+	Decisions []decision `json:"decisions,omitempty"`
+	Ask       *question  `json:"ask,omitempty"`
+}
+
+type decision struct {
+	Verdict string `json:"verdict,omitempty"`
+	Reason  string `json:"reason,omitempty"`
+}
+
+type question struct {
+	Question string   `json:"question"`
+	Choices  []string `json:"choices"`
+}
+
+// conn is the RPC pipe while Serve runs; current is the request being
+// handled, so Ask can reply under its id.
+var conn struct {
+	rd      *bufio.Reader
+	enc     *json.Encoder
+	current int
+}
+
+// Ask shows the user question with choices and blocks for the pick.
+// It returns "" if the user dismissed it or no one can answer.
+func Ask(q string, choices ...string) string {
+	if conn.enc == nil {
+		return ""
+	}
+	if err := conn.enc.Encode(reply{ID: conn.current, Ask: &question{Question: q, Choices: choices}}); err != nil {
+		return ""
+	}
+
+	// The host answers before anything else under this id.
+	line, err := conn.rd.ReadBytes('\n')
+	if err != nil {
+		return ""
+	}
+	var req request
+	if err := json.Unmarshal(line, &req); err != nil || req.Op != opAnswer {
+		return ""
+	}
+	return req.Input
 }
 
 // Serve handles host requests until the host closes the pipe.
@@ -155,6 +202,7 @@ func Serve() error {
 
 	rd := bufio.NewReader(f)
 	enc := json.NewEncoder(f)
+	conn.rd, conn.enc = rd, enc
 	for {
 		line, err := rd.ReadBytes('\n')
 		if errors.Is(err, io.EOF) {
@@ -168,6 +216,7 @@ func Serve() error {
 		if err := json.Unmarshal(line, &req); err != nil {
 			continue
 		}
+		conn.current = req.ID
 		if err := enc.Encode(handle(req)); err != nil {
 			return err
 		}
@@ -243,12 +292,23 @@ func runCommand(name, input string) (Result, error) {
 func hook(req request, r *reply) {
 	switch {
 	case req.Event == eventToolCall && onCall != nil:
-		d := onCall(req.Call)
-		r.Block = d.Verdict == Block
-		r.Reason = d.Reason
+		r.Decisions = make([]decision, len(req.Calls))
+		for i, c := range req.Calls {
+			r.Decisions[i] = toWire(onCall(c))
+		}
 
 	case req.Event == eventToolResult && onResult != nil:
 		out := onResult(req.Call, req.Output)
 		r.Output = &out
 	}
+}
+
+func toWire(d Decision) decision {
+	switch d.Verdict {
+	case Block:
+		return decision{Verdict: verdictBlock, Reason: d.Reason}
+	case Grant:
+		return decision{Verdict: verdictGrant}
+	}
+	return decision{}
 }

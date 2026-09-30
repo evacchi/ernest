@@ -67,9 +67,13 @@ GOOS=wasip1 GOARCH=wasm go build -o .ernest/extensions/reverse.wasm ./examples/r
 GOOS=wasip1 GOARCH=wasm go build -o .ernest/extensions/model.wasm ./examples/model
 GOOS=wasip1 GOARCH=wasm go build -o .ernest/extensions/hello.wasm ./examples/hello
 GOOS=wasip1 GOARCH=wasm go build -o .ernest/extensions/resume.wasm ./examples/resume
+GOOS=wasip1 GOARCH=wasm go build -o .ernest/extensions/approve.wasm ./examples/approve
 ```
 
 - `examples/reverse`: a tool plus a hook blocking `rm -rf`.
+- `examples/approve`: asks before an escalated `bash` call leaves the
+  sandbox: allow once, allow for session, or deny. `/revoke` drops a
+  session approval.
 - `examples/model`: the `/model` slash command. It only reads and writes
   files under `/agent/config`; the host switches the provider. Without a
   name it returns the chat models from `/agent/config/models` as choices,
@@ -104,9 +108,18 @@ answers with the same `id`.
 |---|---|---|
 | `describe` | — | `{tools:[{name,description,parameters}], hooks:[...]}` |
 | `call` | `{name,args}` | `{output}` or `{error}` |
-| `hook` | `{event:"tool_call",call}` | `{block?,reason?}` |
+| `hook` | `{event:"tool_call",calls:[...]}` | `{decisions:[{verdict?,reason?}]}`, one per call |
 | `hook` | `{event:"tool_result",call,output}` | `{output?}` (absent: unchanged) |
 | `command` | `{name,input}` | `{output}`, `{choices,selected?}` or `{error}` |
+
+A `verdict` is `block`, `grant` or absent (no objection). Across
+extensions, `block` wins over `grant`. A granted `bash` call may escalate
+(`escalate: true`) and run outside the sandbox; without a grant,
+escalation is refused.
+
+Before replying, the guest may ask the user: it sends
+`{id,ask:{question,choices}}` and the host answers under the same id with
+`{id,op:"answer",input}`, `""` if dismissed or in one-shot mode.
 
 `describe` may also list `commands:[{name,prefix?,description}]`; they show
 up as slash commands in the UI. A `prefix` symbol is a shorthand: `?why`
