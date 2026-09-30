@@ -149,6 +149,7 @@ type session struct {
 	commands   []ui.Command
 	extensions []string
 	project    prompt.Context // AGENTS.md files and skills
+	bash       tools.Bash     // sandboxed, for the model
 
 	store *history.Store
 	id    atomic.Pointer[string]
@@ -162,7 +163,13 @@ type session struct {
 // and turns extension commands into UI slash commands. Extensions read
 // history lazily, after the agent exists.
 func assemble(p provider, wd string, emit func(agent.Event), log io.Writer) (*session, error) {
-	s := &session{store: history.NewStore(sessionDir)}
+	// The model's bash writes only to wd and temp, never the network.
+	sb, err := tools.NewSandbox(wd, os.TempDir())
+	if err != nil {
+		return nil, err
+	}
+
+	s := &session{store: history.NewStore(sessionDir), bash: tools.Bash{Sandbox: sb}}
 	id := history.NewID()
 	s.id.Store(&id)
 
@@ -255,7 +262,7 @@ func (s *session) sessions() ([]string, error) {
 // use records plugins' commands and names and returns the agent's tools
 // (built-ins first, so extensions cannot shadow them) and hooks.
 func (s *session) use(plugins []*ext.Plugin) ([]agent.Tool, []agent.Hook) {
-	ts := []agent.Tool{tools.Read{}, tools.Write{}, tools.Edit{}, tools.Bash{}}
+	ts := []agent.Tool{tools.Read{}, tools.Write{}, tools.Edit{}, s.bash}
 	var hooks []agent.Hook
 	s.commands, s.extensions = nil, nil
 

@@ -25,7 +25,10 @@ const bashSchema = `{
 }`
 
 // Bash runs a shell command and returns combined stdout/stderr.
-type Bash struct{}
+// A nil Sandbox runs it unconfined.
+type Bash struct {
+	Sandbox Sandbox
+}
 
 type bashArgs struct {
 	Command string `json:"command"`
@@ -36,7 +39,7 @@ func (Bash) Spec() llm.ToolSpec {
 	return spec("bash", "Run a bash command in the working directory.", bashSchema)
 }
 
-func (Bash) Run(ctx context.Context, args json.RawMessage) (string, error) {
+func (b Bash) Run(ctx context.Context, args json.RawMessage) (string, error) {
 	in, err := decode[bashArgs](args)
 	if err != nil {
 		return "", err
@@ -52,6 +55,13 @@ func (Bash) Run(ctx context.Context, args json.RawMessage) (string, error) {
 	// WaitDelay stops Wait from hanging on children that keep pipes open.
 	cmd := exec.CommandContext(ctx, shell, "-c", in.Command)
 	cmd.WaitDelay = pipeGrace
+
+	// Fail closed: a sandbox that cannot wrap the command must not be skipped.
+	if b.Sandbox != nil {
+		if err := b.Sandbox.Wrap(cmd); err != nil {
+			return "", err
+		}
+	}
 	out, err := cmd.CombinedOutput()
 
 	// A failing command is a result, not a tool error: the model needs the output.
